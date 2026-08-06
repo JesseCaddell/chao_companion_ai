@@ -6,5 +6,6 @@ __pycache__/
 
 data/chao.db
 data/sessions/*.jsonl
+data/vts_token.txt
 src/chao/dashboard/web/node_modules/
 src/chao/dashboard/web/dist/
