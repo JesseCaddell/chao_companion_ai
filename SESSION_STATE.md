@@ -6,15 +6,29 @@ for standing conventions. Update this at the end of each session.
 
 ## Where we are
 
-**Phase 0 is complete.** Build order is design doc §17: 0 VTS spike → 1 brain +
-director + dashboard → 2 TTS + motion → 3 aliveness → 4 Twitch → 5 voice →
-6 memory → 7 reflection.
+**Phase 0 is complete. Phase 1 is started** (brain + director + dashboard —
+typed text → LLM → tags → emote fires, dashboard live, anticipation nudge).
+Build order is design doc §17: 0 VTS spike → 1 brain + director + dashboard →
+2 TTS + motion → 3 aliveness → 4 Twitch → 5 voice → 6 memory → 7 reflection.
 
-**Next up: Phase 1** (brain + director + dashboard — typed text → LLM → tags →
-emote fires, dashboard live, anticipation nudge). Not started yet. Per
-CLAUDE.md's working-style rule, this phase defines the `Event` schema and the
-bus contract, which should get an Opus review before implementation starts —
-that review has not happened yet.
+`src/chao/events.py` and `src/chao/bus.py` are implemented — `Event`
+dataclass, `Kind` string constants, and a `Bus` with two lanes: arbitrated
+turns (`input.chat`/`input.voice`/`input.manual`, single in-flight, priority
+preemption via cancel token, 15s speech cooldown) and un-arbitrated fan-out
+for everything else (including `input.ambient`, deliberately, so aliveness
+reactions stay unblocked). 9 tests passing, ruff clean. Added `pytest`,
+`pytest-asyncio`, `ruff` as dev dependencies (weren't in `pyproject.toml`
+before this session).
+
+**The required Opus review of this design has not happened yet** — the
+`advisor` tool was overloaded every time it was tried this session (4
+attempts across the session). Per CLAUDE.md's working-style rule, the
+`Event`/bus contract is supposed to get that review before other code
+builds on it. User explicitly chose "draft now, review later" when asked.
+Full writeup of the judgment calls that need checking is in
+`docs/event_bus_design.md` — **read that file first next session** and try
+`advisor()` again before writing `brain/`, `director/`, or wiring
+`__main__.py` to a real `turn_handler`.
 
 ## What Phase 0 proved
 
@@ -67,9 +81,17 @@ The rig's confirmed parameter groups, for reference:
 
 ## Next actions
 
-1. Get an Opus review of the `Event` schema / bus contract shape before
-   writing `bus.py` or `events.py` for real (CLAUDE.md working-style rule).
-2. Scaffold Phase 1: typed text → LLM → tags → emote fires, dashboard live,
-   anticipation nudge.
+1. Get the deferred Opus review of `docs/event_bus_design.md` (retry
+   `advisor()`), specifically the 5 flagged judgment calls — ambient
+   bypassing arbitration, the collapsed 3-tier chat priority, the 2s
+   preemption teardown timeout, cooldown exempting voice, and the injected
+   `turn_handler` shape.
+2. Continue Phase 1: `brain/` (LLM backend protocol + prompt assembly),
+   `director/tags.py` (tolerant tag parser) and `director/director.py`
+   (wires tag stream → mood/emote decisions), then `__main__.py` to wire a
+   real `turn_handler` into `Bus.run()`, then the dashboard skeleton
+   (FastAPI + websocket subscriber) so turns are visible live. Anticipation
+   nudge (§10.5) needs `brain.request` to fire the question-mark ball pop
+   before any audio exists — director-level, not bus-level.
 3. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
    priority, quick, not expected to change any conclusion).

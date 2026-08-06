@@ -547,8 +547,8 @@ The spine of the system. Every component emits these; the bus, dashboard, memory
 ```python
 @dataclass(frozen=True)
 class Event:
-    id: str          # uuid
-    ts: float        # monotonic, for latency math
+    id: str  # uuid
+    ts: float  # monotonic, for latency math
     turn_id: str | None
     kind: str
     payload: dict

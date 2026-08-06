@@ -182,8 +182,10 @@ async def main() -> None:
     print(f"Connecting to {client.url} ...")
     await client.connect()
 
-    print("Authenticating -- if this is the first run, check VTube Studio for an "
-          "authorization popup (it can be missed if VTS is on another monitor).")
+    print(
+        "Authenticating -- if this is the first run, check VTube Studio for an "
+        "authorization popup (it can be missed if VTS is on another monitor)."
+    )
     await client.authenticate()
     print("Authenticated.\n")
 
