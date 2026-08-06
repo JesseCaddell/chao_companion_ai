@@ -163,3 +163,10 @@ Primary model is Sonnet; Opus is available as an advisor. Escalate to Opus befor
 Otherwise proceed directly. Prefer small commits scoped to one phase deliverable. When a
 design doc section conflicts with something here, this file is the newer source of truth —
 flag the discrepancy rather than silently picking one.
+
+## Commit hygiene
+
+Group related changes into one commit instead of committing rapid-fire as each file lands.
+If you're about to make several small, similar edits (a scaffolding pass, a config sweep, a
+docs update), batch them and commit once at a natural stopping point — not one commit per
+file or per edit.
