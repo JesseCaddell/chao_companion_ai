@@ -26,12 +26,8 @@ seems to call for drawing the character, the task is wrong.
 
 ## Current status
 
-**Phase 0.** Connect to VTS, authenticate, dump `Live2DParameterListRequest`, trigger a
-hotkey, inject a custom parameter. Nothing else is in scope until that dump exists — it
-determines whether the ball has independent position parameters, which gates §8.2.
-
-Build order (design doc §17): 0 VTS spike → 1 brain + director + dashboard → 2 TTS + motion
-→ 3 aliveness → 4 Twitch → 5 voice → 6 memory → 7 reflection.
+See `SESSION_STATE.md` — updated at the end of each session, and the place to look to pick
+up where the last one left off. Build order lives there and in design doc §17.
 
 ## Hard invariants
 
