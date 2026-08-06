@@ -1,0 +1,10 @@
+.idea/
+.venv/
+__pycache__/
+*.pyc
+.env
+
+data/chao.db
+data/sessions/*.jsonl
+src/chao/dashboard/web/node_modules/
+src/chao/dashboard/web/dist/
