@@ -103,9 +103,18 @@ meso, ~1/min macro. Idle drift uses smoothed noise, never sine waves — a detec
 worse than no motion. Target roughly 10 non-verbal reactions per spoken response.
 
 **outputs/vts.py** — websocket on `ws://localhost:8001`, one-time token auth, token cached to
-disk. Two channels: `HotkeyTriggerRequest` for discrete emotes, `InjectParameterDataRequest`
-for continuous state. Hotkeys are transient punctuation; parameters carry sustained state.
-Never sustain an authored emote beyond ~4s.
+disk. Two channels: `ExpressionActivationRequest` (explicit `active: true/false`, not
+`HotkeyTriggerRequest` — that toggles blindly and leaves the model stuck if a call is dropped)
+for discrete emotes, `InjectParameterDataRequest` for continuous state. Hotkeys are transient
+punctuation; parameters carry sustained state. Never sustain an authored emote beyond ~4s.
+
+**Phase 0 finding (discrepancy from the paragraph above as originally written):**
+`InjectParameterDataRequest` cannot write Live2D model parameters directly — VTS error 453.
+It only writes plugin-created custom "tracking" parameters. To make a parameter's injected
+value actually move the model, that custom parameter must be bound, by hand, inside the VTS
+UI, to a specific Live2D output — per-model, one-time, not scriptable via the API. Continuous
+state (mood, etc.) is still viable, it just needs that manual binding step done once per
+parameter before the code can drive it. See `docs/rigging_check_list.md`.
 
 **dashboard/** — a pure subscriber. All authoritative state lives in the brain process.
 Commands travel back over the same websocket as explicit messages. The dashboard crashing

@@ -748,7 +748,7 @@ The TTS landscape moves quickly; re-evaluate at phase 2 rather than committing n
 
 ## 19. Open questions
 
-1. **Does the ball have independent position parameters?** Resolved by the phase 0 diagnostic. If not, §8.2 becomes a rigging task and should be scheduled before phase 2.
+1. **Does the ball have independent position parameters?** Resolved by the phase 0 diagnostic: no. Confirmed by direct parameter testing in VTS and a live head-drag test showing no inherent lag. §8.2 is a rigging task, tracked in `docs/rigging_check_list.md`, scheduled before phase 2. Not a hard stop for phases 0-1.
 2. **Which emote additions from §6.5 get mapped, and when?** Neutral is blocking for phase 1. Ellipsis is the highest-value optional.
 3. **Should the chao hear game audio?** Reacting to what you're playing is compelling but adds an audio-classification pipeline. Deferred past v1.
 4. **What is the chao's voice?** Piper voice selection at phase 2; pitch shifting may be needed to match the character.
