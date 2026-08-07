@@ -37,7 +37,7 @@ KNOWN_LOOK_TARGETS = frozenset({"chat", "you"})
 # unrecognized-but-tag-shaped tokens still get stripped from spoken text.
 _TAG_PATTERN = re.compile(r"\[([a-zA-Z0-9_-]+)(?::([a-zA-Z0-9_-]+))?\]")
 
-_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +97,7 @@ def split_sentences(text: str) -> list[str]:
     director.py so both use the same notion of "sentence" as `parse_tags`'
     `sentence_index`.
     """
-    return [s for s in _SENTENCE_END.split(text) if s]
+    return [s for s in SENTENCE_BOUNDARY.split(text) if s]
 
 
 def _is_known(name: str, value: str | None) -> bool:
@@ -111,4 +111,4 @@ def _sentence_index_at(text: str, offset: int) -> int:
     equivalently, the 0-based index of the sentence starting at or after
     it, which is the sentence this tag precedes.
     """
-    return len(_SENTENCE_END.findall(text[:offset]))
+    return len(SENTENCE_BOUNDARY.findall(text[:offset]))

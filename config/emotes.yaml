@@ -1,0 +1,38 @@
+# Emote pools, hotkey selection, and reaction mapping. See design doc §14.
+#
+# `hotkeys` names are provisional — copied from the design doc's example,
+# not yet confirmed against this model's actual VTS hotkey list. Verify
+# before outputs/vts.py wires these up to real ExpressionActivationRequest
+# calls.
+#
+# director.py currently only reads `pools`. `fly` and `heart_gate` belong
+# to aliveness.py/mood.py (not built yet); `reactions` belongs to whatever
+# drives non-verbal-only reactions (§10.4), also not built yet.
+
+pools:
+  happy:      { hotkeys: [chao.happy], cooldown_s: 4, duration_s: 2.5 }
+  heart:      { hotkeys: [chao.heart], cooldown_s: 12, duration_s: 3.0 }
+  curious:    { hotkeys: [chao.question], cooldown_s: 3, duration_s: 2.0 }
+  surprise:   { hotkeys: [chao.surprise], cooldown_s: 6, duration_s: 1.5 }
+  confused:   { hotkeys: [chao.confused], cooldown_s: 8, duration_s: 3.0 }
+  sad:        { hotkeys: [chao.sad], cooldown_s: 10, duration_s: 4.0 }
+  angry:      { hotkeys: [chao.angry], cooldown_s: 15, duration_s: 3.0 }
+  neutral:    { hotkeys: [chao.neutral], cooldown_s: 0, duration_s: 0 }
+
+fly:
+  hotkey: chao.fly
+  on_above: 0.70
+  off_below: 0.40
+  min_dwell_s: 5
+
+heart_gate:
+  affinity_threshold: 0.4
+  valence_threshold: 0.5
+
+reactions:            # non-verbal only, no LLM call
+  chat_spike:     surprise
+  name_mention:   curious
+  new_follower:   happy
+  long_silence:   sad
+  streamer_laugh: happy
+  thinking:       curious

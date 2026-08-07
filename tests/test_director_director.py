@@ -1,0 +1,299 @@
+import random
+
+from chao.director.director import Director, EmoteConfig, EmotePool, load_emote_config
+from chao.events import Kind
+
+
+def make_config(**pools: EmotePool) -> EmoteConfig:
+    return EmoteConfig(pools=pools)
+
+
+def default_config() -> EmoteConfig:
+    return make_config(
+        happy=EmotePool(hotkeys=["chao.happy"], cooldown_s=4.0, duration_s=2.5),
+        curious=EmotePool(hotkeys=["chao.question"], cooldown_s=3.0, duration_s=2.0),
+        surprise=EmotePool(hotkeys=["chao.surprise"], cooldown_s=6.0, duration_s=1.5),
+        confused=EmotePool(hotkeys=["chao.confused"], cooldown_s=8.0, duration_s=3.0),
+        sad=EmotePool(hotkeys=["chao.sad"], cooldown_s=10.0, duration_s=4.0),
+        angry=EmotePool(hotkeys=["chao.angry"], cooldown_s=15.0, duration_s=3.0),
+    )
+
+
+class FakeClock:
+    def __init__(self, start: float = 0.0):
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def make_director(config=None, clock=None, rng=None) -> tuple[Director, list]:
+    events = []
+    director = Director(
+        emote_config=config or default_config(),
+        publish=events.append,
+        clock=clock or FakeClock(),
+        rng=rng or random.Random(0),
+    )
+    return director, events
+
+
+def test_complete_sentence_in_one_chunk_fires_immediately():
+    director, events = make_director()
+    director.begin_turn("t1")
+
+    # Trailing space matters: a terminator with nothing after it yet is
+    # ambiguous (could be "Dr." or generation still in flight) — see
+    # test_incomplete_sentence_waits_for_end_turn.
+    ready = director.process_chunk("[happy] Hi there! ")
+
+    assert ready == ["Hi there!"]
+    kinds = [e.kind for e in events]
+    assert kinds == [Kind.DIRECTOR_TAG, Kind.DIRECTOR_EMOTE]
+
+
+def test_sentence_split_across_chunks_buffers_correctly():
+    director, _events = make_director()
+    director.begin_turn("t1")
+
+    assert director.process_chunk("[happy] Hi ") == []
+    assert director.process_chunk("there!") == []
+    assert director.process_chunk(" ") == ["Hi there!"]
+
+
+def test_incomplete_sentence_waits_for_end_turn():
+    director, events = make_director()
+    director.begin_turn("t1")
+
+    assert director.process_chunk("[happy] Hi there") == []
+    assert events == []
+
+    result = director.end_turn()
+
+    assert result == "Hi there"
+    assert [e.kind for e in events] == [Kind.DIRECTOR_TAG, Kind.DIRECTOR_EMOTE]
+    # end_turn must clear _turn_id only *after* publishing, or the final
+    # flush's events lose the turn_id the latency waterfall depends on.
+    assert all(e.turn_id == "t1" for e in events)
+
+
+def test_stray_bracket_does_not_stall_the_rest_of_the_turn():
+    """A genuinely malformed stray "[" in prose must not block all further
+    sentences from streaming for the rest of the turn — that would defeat
+    the sentence-streaming latency budget (§12). tags.py already tolerates
+    stray brackets by leaving them as literal text; director.py must not
+    be stricter than that.
+    """
+    director, _events = make_director()
+    director.begin_turn("t1")
+
+    ready1 = director.process_chunk("Oops [ here. ")
+    assert ready1 == ["Oops [ here."]
+
+    ready2 = director.process_chunk("Next sentence. ")
+    assert ready2 == ["Next sentence."]
+
+
+def test_tag_split_across_chunk_boundary_does_not_leak():
+    director, events = make_director()
+    director.begin_turn("t1")
+
+    # "Hi." is already complete and tag-free, so it releases immediately;
+    # the not-yet-closed "[hap" must not fire early or leak as literal text.
+    ready1 = director.process_chunk("Hi. [hap")
+    assert ready1 == ["Hi."]
+    assert events == []
+
+    ready2 = director.process_chunk("py] Bye. ")
+
+    assert ready2 == ["Bye."]
+    assert [e.kind for e in events] == [Kind.DIRECTOR_TAG, Kind.DIRECTOR_EMOTE]
+    tag_event = events[0]
+    assert tag_event.payload["sentence_index"] == 1  # second sentence overall
+
+
+def test_multiple_sentences_in_one_chunk_get_incrementing_indices():
+    director, events = make_director()
+    director.begin_turn("t1")
+
+    director.process_chunk("[happy] One. [sad] Two. ")
+
+    tag_events = [e for e in events if e.kind == Kind.DIRECTOR_TAG]
+    assert [e.payload["sentence_index"] for e in tag_events] == [0, 1]
+
+
+def test_end_turn_flushes_remaining_text_without_terminator():
+    director, _events = make_director()
+    director.begin_turn("t1")
+    director.process_chunk("No terminator here")
+
+    result = director.end_turn()
+
+    assert result == "No terminator here"
+
+
+def test_end_turn_with_nothing_buffered_returns_none():
+    director, events = make_director()
+    director.begin_turn("t1")
+
+    assert director.end_turn() is None
+    assert events == []
+
+
+def test_unknown_tag_produces_no_events():
+    director, events = make_director()
+    director.begin_turn("t1")
+
+    ready = director.process_chunk("[proud] Nice. ")
+
+    assert ready == ["Nice."]
+    assert events == []
+
+
+def test_pause_and_look_tags_produce_tag_event_but_no_emote():
+    director, events = make_director()
+    director.begin_turn("t1")
+
+    director.process_chunk("[look:chat] Hi chat. ")
+
+    assert [e.kind for e in events] == [Kind.DIRECTOR_TAG]
+    assert events[0].payload["tag"] == "look:chat"
+
+
+def test_cooldown_blocks_second_fire_within_window():
+    clock = FakeClock()
+    director, events = make_director(clock=clock)
+    director.begin_turn("t1")
+
+    director.process_chunk("[happy] One. ")
+    clock.advance(1.0)  # cooldown_s is 4.0 for "happy"
+    director.process_chunk("[happy] Two. ")
+
+    emote_events = [e for e in events if e.kind == Kind.DIRECTOR_EMOTE]
+    assert len(emote_events) == 1
+
+
+def test_emote_fires_again_after_cooldown_elapses():
+    clock = FakeClock()
+    director, events = make_director(clock=clock)
+    director.begin_turn("t1")
+
+    director.process_chunk("[happy] One. ")
+    clock.advance(5.0)  # past the 4.0s cooldown
+    director.process_chunk("[happy] Two. ")
+
+    emote_events = [e for e in events if e.kind == Kind.DIRECTOR_EMOTE]
+    assert len(emote_events) == 2
+
+
+def test_cooldown_persists_across_begin_turn():
+    """A pool that fired near the end of turn N should still be cooling at
+    the start of turn N+1 — cooldowns are deliberately not per-turn state.
+    """
+    clock = FakeClock()
+    director, events = make_director(clock=clock)
+    director.begin_turn("t1")
+    director.process_chunk("[happy] One. ")
+
+    clock.advance(1.0)  # still inside "happy"'s 4.0s cooldown
+    director.begin_turn("t2")
+    director.process_chunk("[happy] Two. ")
+
+    emote_events = [e for e in events if e.kind == Kind.DIRECTOR_EMOTE]
+    assert len(emote_events) == 1
+    assert emote_events[0].turn_id == "t1"
+
+
+def test_hotkey_never_repeats_consecutively_with_two_hotkeys():
+    clock = FakeClock()
+    config = make_config(
+        happy=EmotePool(hotkeys=["chao.happy_a", "chao.happy_b"], cooldown_s=1.0, duration_s=1.0)
+    )
+    director, events = make_director(config=config, clock=clock)
+    director.begin_turn("t1")
+
+    fired = []
+    for _ in range(5):
+        director.process_chunk("[happy] Hi. ")
+        clock.advance(2.0)
+    fired = [e.payload["hotkey_id"] for e in events if e.kind == Kind.DIRECTOR_EMOTE]
+
+    assert len(fired) == 5
+    assert all(fired[i] != fired[i + 1] for i in range(len(fired) - 1))
+
+
+def test_single_hotkey_pool_can_repeat():
+    clock = FakeClock()
+    config = make_config(happy=EmotePool(hotkeys=["chao.happy"], cooldown_s=1.0, duration_s=1.0))
+    director, events = make_director(config=config, clock=clock)
+    director.begin_turn("t1")
+
+    for _ in range(3):
+        director.process_chunk("[happy] Hi. ")
+        clock.advance(2.0)
+
+    fired = [e.payload["hotkey_id"] for e in events if e.kind == Kind.DIRECTOR_EMOTE]
+    assert fired == ["chao.happy", "chao.happy", "chao.happy"]
+
+
+def test_missing_pool_in_config_does_not_crash():
+    director, events = make_director(config=make_config())  # no pools defined at all
+    director.begin_turn("t1")
+
+    ready = director.process_chunk("[happy] Hi. ")
+
+    assert ready == ["Hi."]
+    assert [e.kind for e in events] == [Kind.DIRECTOR_TAG]
+
+
+def test_turn_id_is_threaded_through_events():
+    director, events = make_director()
+    director.begin_turn("turn-abc")
+
+    director.process_chunk("[happy] Hi. ")
+
+    assert len(events) == 2  # DIRECTOR_TAG and DIRECTOR_EMOTE, not a vacuous pass
+    assert all(e.turn_id == "turn-abc" for e in events)
+
+
+def test_end_turn_clears_turn_id():
+    director, _events = make_director()
+    director.begin_turn("turn-abc")
+    director.process_chunk("Hi.")
+    director.end_turn()
+
+    assert director._turn_id is None
+
+
+def test_load_emote_config_parses_pools(tmp_path):
+    config_path = tmp_path / "emotes.yaml"
+    config_path.write_text(
+        """
+pools:
+  happy: { hotkeys: [chao.happy], cooldown_s: 4, duration_s: 2.5 }
+  heart: { hotkeys: [chao.heart, chao.heart2], cooldown_s: 12, duration_s: 3.0 }
+
+fly:
+  hotkey: chao.fly
+"""
+    )
+
+    config = load_emote_config(config_path)
+
+    assert config.pools["happy"] == EmotePool(
+        hotkeys=["chao.happy"], cooldown_s=4.0, duration_s=2.5
+    )
+    assert config.pools["heart"].hotkeys == ["chao.heart", "chao.heart2"]
+
+
+def test_load_emote_config_the_real_file():
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "config" / "emotes.yaml"
+    config = load_emote_config(path)
+
+    for tag_pool in ("happy", "curious", "surprise", "confused", "sad", "angry"):
+        assert tag_pool in config.pools
