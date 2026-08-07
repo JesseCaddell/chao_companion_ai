@@ -15,22 +15,37 @@ is gone, replaced by an in-process FastAPI/uvicorn server plus a Vite+React
 frontend (`src/chao/dashboard/web/`), exactly per §11.4's stack. A real
 turn (typed input → Anthropic → tags → emotes) was pushed through the
 actual websocket and its full event sequence confirmed on the wire via a
-scripted client — see "Dashboard skeleton" below for what was and wasn't
-visually verified (no Chrome extension available this session, so the
-React frontend itself was never opened in an actual browser — flagged
-explicitly, not glossed over).
+scripted client. This part is committed (`99d667a`).
 
-Also this session: the C→D directory move (done between sessions, outside
-a coding session) had silently broken the venv's editable install, which
-would have made every test fail with a confusing `ModuleNotFoundError`
-the moment anyone tried to run them — caught and fixed. Ollama got
-installed and `qwen3:8b` pulled and wired in as the local fallback,
-confirmed CPU-only and working, though slow (as expected).
+**Presentation layer changed after that commit, same session:** the user
+asked, after seeing the plan, to present the dashboard in a native window
+via `pywebview` instead of a Chrome tab — Chrome's baseline per-tab/process
+overhead is unwelcome given CLAUDE.md invariant 1 (zero VRAM, the user
+games on this machine; RAM overhead isn't the invariant's literal scope
+but is in the same spirit). Design doc §11.4 and §18's tech table updated
+first, then built: `chao.dashboard.server` now also serves the built
+frontend (`web/dist/`) as static files, and a new `chao.dashboard.window`
+entry point opens it in a native window via WebView2 (Windows' built-in
+Chromium-based runtime — reuses what's already on the machine rather than
+adding a separate browser instance). See "Native window presentation"
+below for what was and wasn't verified — no Chrome extension was available
+either time this session, so the actual rendered UI has still never been
+seen by anything with eyes, only proven correct at the HTTP/websocket
+wire level and via the native window process staying alive with no errors.
 
-Nothing is broken or mid-edit; 93 tests passing, ruff clean. Everything
-built this session is on disk but **not yet committed** — the user hasn't
-asked for a commit yet this session. The only loose end from before is
-`neutral`, still deliberately shelved.
+Also this session, before any of the above: the C→D directory move (done
+between sessions, outside a coding session) had silently broken the
+venv's editable install, which would have made every test fail with a
+confusing `ModuleNotFoundError` the moment anyone tried to run them —
+caught and fixed. Ollama got installed and `qwen3:8b` pulled and wired in
+as the local fallback, confirmed CPU-only and working, though slow (as
+expected).
+
+Nothing is broken or mid-edit; 95 tests passing, ruff clean. The dashboard
+skeleton is committed; **the native-window presentation-layer change is
+on disk, tested, and ready, but not yet committed** as of this write-up —
+the user hasn't asked for that commit yet. The only loose end from before
+is `neutral`, still deliberately shelved.
 
 **Pick up here next session:** next actions list at the bottom, roughly in
 priority order. `aliveness.py` is probably the most natural next step now
@@ -662,16 +677,76 @@ correct — it's the same event stream `App.tsx` is built to parse. **What
 it does not prove:** that the React component actually renders this
 correctly in a real browser (CSS layout, the streaming-bubble/entry-list
 split, the connected/disconnected indicator). That's a genuine gap, not
-glossed over — next session, if the Chrome extension is available, open
-`http://localhost:5173` while the app is running and visually confirm the
-event feed renders as intended before trusting it further.
+glossed over — see "Native window presentation" below for the follow-up
+attempt with the (now-changed) production presentation layer.
+
+## Native window presentation (session 5, cont'd)
+
+After the dashboard skeleton above was committed, the user asked to swap
+the presentation layer from a Chrome tab to a native OS window via
+`pywebview`, specifically to avoid a full separate Chrome process's
+baseline memory overhead — CLAUDE.md invariant 1 is literally about VRAM,
+not RAM, but the underlying reason for it (this machine is also used for
+gaming, background overhead is worth avoiding) applies in spirit. Design
+doc §11.4 and §18's tech table updated to document the decision *before*
+building it, per the user's explicit ask to update the plan first.
+
+**What changed:**
+- `chao.dashboard.server`: added `WEB_DIST = Path(__file__).parent / "web"
+  / "dist"` and, after the websocket route, `app.mount("/", StaticFiles(...),
+  ...)` when that directory exists — skipped gracefully if `npm run build`
+  hasn't been run, so the `npm run dev` workflow is unaffected. Also moved
+  `DASHBOARD_HOST`/`DASHBOARD_PORT` here from `__main__.py`, since they're
+  properties of the dashboard server, not the brain — `__main__.py` now
+  imports them rather than defining them, which also let the new
+  `chao.dashboard.window` import them without an inverted dependency (a
+  leaf module importing the composition root).
+- `chao.dashboard.window` (new): `webview.create_window(...)` +
+  `webview.start()`, pointed at the dashboard server's URL. Deliberately a
+  separate process/entry point from `chao.__main__`, not a thread inside
+  it — `webview.start()` blocks and needs the OS main thread for its GUI
+  loop, which conflicts with `__main__.py`'s asyncio loop already owning
+  that thread in the brain process. Run alongside `uv run python -m chao`,
+  same relationship a browser tab would have.
+- `pyproject.toml`: added `pywebview` (pulled in `pythonnet`/`clr-loader`
+  for the Windows EdgeChromium/WebView2 backend).
+- `CLAUDE.md`'s Commands section: added the window-launch command and
+  `npm run build`; reworded the `npm run dev` line to make clear it's for
+  frontend iteration, not normal use, now that the server self-serves the
+  built frontend.
+- New tests in `test_dashboard_server.py`: static files serve correctly
+  when `WEB_DIST` (monkeypatched) points at a real directory with an
+  `index.html`, and the mount is absent (404 on `/`) when it doesn't. 95
+  tests passing, ruff clean.
+
+**Verification, and its limits (round two).** Built the frontend for real
+(`npm run build`), ran the actual app, and confirmed via `curl` that
+`GET /` and `GET /assets/*.js` both return 200 with the correct built
+HTML/JS — the static-serving code path is genuinely exercised, not just
+unit-tested against a fake directory. Then ran
+`python -m chao.dashboard.window` for real: no exception, no traceback,
+and `msedgewebview2.exe` (six processes — WebView2's normal
+browser/renderer/GPU-process split, the same architecture as Chrome)
+stayed alive and running, consistent with the runtime having actually
+loaded and rendered the page rather than failing silently. **Chrome
+extension still wasn't available this session** (same limitation as the
+dashboard skeleton work), so — same as before — nobody has visually
+confirmed the rendered UI actually looks right inside the window. Process
+health plus a confirmed-correct HTTP response is real evidence something
+is working, but it is not the same as having seen it.
 
 ## Next actions
 
-1. **Visually verify the dashboard frontend in a real browser** — see the
-   "Verification, and its limits" note directly above. The backend/wire
-   protocol is proven; the React rendering isn't, yet. Cheap to do first
-   thing next session, before building anything further on top of it.
+1. **Visually confirm the dashboard actually renders correctly** — in the
+   `pywebview` window now, not a Chrome tab (that's genuinely obsolete as
+   of this session). Two ways to get there: get the Chrome extension
+   connected (user needs to install it + sign in, see conversation) and
+   at least verify the same HTML/CSS in a tab as a proxy, or find another
+   way to inspect the native window's actual rendered content. Nothing
+   about the wire protocol or the HTTP layer is in question anymore —
+   only "does the CSS layout look right" is still unverified, and it's
+   been unverified for two rounds now. Cheap to close out, worth doing
+   before building anything else on top of it.
 2. Aliveness — `aliveness.py` is still an empty stub, and it's arguably
    the single highest-value remaining piece of phase 1. Two things live
    here: the meso/macro idle-drift layers (CLAUDE.md's `director/aliveness.py`

@@ -141,12 +141,14 @@ Two special cases:
 
 ```bash
 uv sync                                  # install
-uv run python -m chao                    # run the brain
+uv run python -m chao                    # run the brain (serves the dashboard's API + built frontend)
+uv run python -m chao.dashboard.window   # open the dashboard in a native window (run alongside the above)
 uv run python -m chao.tools.vts_probe    # phase 0 diagnostic dump
 uv run python -m chao.memory.reflection   # offline reflection job
 uv run pytest                            # tests
 uv run ruff check --fix && uv run ruff format
-cd src/chao/dashboard/web && npm run dev  # dashboard frontend
+cd src/chao/dashboard/web && npm run dev  # dashboard frontend dev server (hot reload; not for normal use)
+cd src/chao/dashboard/web && npm run build  # rebuild the frontend after changing it — `chao` serves this, not the dev server
 ```
 
 Requires VTube Studio running with the plugin API enabled, and VB-Audio Virtual Cable

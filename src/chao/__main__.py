@@ -28,13 +28,10 @@ from chao.brain.cloud import AnthropicBackend
 from chao.brain.local import OllamaBackend
 from chao.brain.turn import TurnOrchestrator
 from chao.bus import Bus
-from chao.dashboard.server import create_app
+from chao.dashboard.server import DASHBOARD_HOST, DASHBOARD_PORT, create_app
 from chao.director.director import Director, EmoteConfig, load_emote_config
 from chao.events import Event, Kind
 from chao.outputs.vts import VTSClient, VTSEmoteSubscriber
-
-DASHBOARD_HOST = "127.0.0.1"
-DASHBOARD_PORT = 8765
 
 CONFIG_DIR = Path("config")
 IDENTITY_PATH = CONFIG_DIR / "identity.md"
@@ -149,8 +146,9 @@ async def main() -> None:
 
     print(
         "chao is listening. Type a message and press enter. 'quit' or Ctrl+D to exit.\n"
-        f"Dashboard: ws://{DASHBOARD_HOST}:{DASHBOARD_PORT}/ws/events "
-        "(run the frontend with `cd src/chao/dashboard/web && npm run dev`)"
+        f"Dashboard: http://{DASHBOARD_HOST}:{DASHBOARD_PORT}/ "
+        "(open it with `uv run python -m chao.dashboard.window`, "
+        "or `cd src/chao/dashboard/web && npm run dev` while iterating on the frontend)"
     )
     try:
         await _read_stdin_into_bus(bus)

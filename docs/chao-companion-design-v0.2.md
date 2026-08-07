@@ -522,6 +522,8 @@ In rough order of how much they'll get used:
 
 FastAPI with a websocket for the event stream, Vite + React frontend, uPlot for streaming sparklines. Runs on a second monitor during stream and doubles as the live control panel.
 
+**Presentation layer (added phase 1, session 6):** the frontend renders in a native OS window via `pywebview` (Windows: WebView2, the same Chromium-based runtime Edge uses, already present on the machine) rather than a Chrome tab. Same HTML/CSS/JS either way — pywebview is just a thinner shell than a full browser process, without the baseline overhead of an entire separate Chrome instance's tabs/extensions/renderer processes sitting alongside it. This matters here specifically because CLAUDE.md invariant 1 (zero VRAM, the user games on this machine) makes every megabyte of background overhead worth avoiding, even RAM outside the invariant's literal VRAM scope. `chao.dashboard.server`'s FastAPI app serves the built frontend (`web/dist/`, via `npm run build`) directly over HTTP alongside its websocket, so a single `uv run python -m chao` is self-contained; `chao.dashboard.window` is a separate small entry point that opens the native window pointed at it. Kept as two processes, not merged into one: pywebview's GUI loop must own the OS main thread, which conflicts with `__main__.py`'s asyncio loop already owning it in the brain process. Frontend development still uses `npm run dev` (Vite's dev server, port 5173, hot reload) — the native window is the production/streaming presentation, not the dev workflow.
+
 ---
 
 ## 12. Latency budget
@@ -746,7 +748,7 @@ Phase 2 also needs a stream-facing subtitle overlay — separate from the dashbo
 | Storage | SQLite + `sqlite-vec` |
 | VTS client | `pyvts`, or ~150 lines of raw websocket |
 | Audio routing | VB-Audio Virtual Cable |
-| Dashboard | FastAPI + Vite/React + uPlot |
+| Dashboard | FastAPI + Vite/React + uPlot, presented in a native `pywebview` window (§11.4) rather than a browser tab |
 | Subtitle overlay | TBD, phase 2 — likely a lightweight browser-source page (transparent bg, OBS-captured) driven by `brain.token`/`output.speech_start`/`output.speech_end`, separate from the dashboard |
 
 The TTS landscape moves quickly; re-evaluate at phase 2 rather than committing now.
