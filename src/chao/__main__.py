@@ -19,6 +19,8 @@ import asyncio
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from chao.brain.backend import CircuitBreakerBackend, LLMBackend
 from chao.brain.cloud import AnthropicBackend
 from chao.brain.local import OllamaBackend
@@ -86,6 +88,8 @@ async def _read_stdin_into_bus(bus: Bus) -> None:
 
 
 async def main() -> None:
+    load_dotenv()  # loads .env into os.environ if present; no-op otherwise
+
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise SystemExit(
             "ANTHROPIC_API_KEY is not set — the cloud backend can't run. "
