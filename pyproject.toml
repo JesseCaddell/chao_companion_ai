@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Headless LLM-driven companion character rendered through VTube Studio."
 requires-python = ">=3.11"
 dependencies = [
+    "anthropic>=0.120.2",
+    "httpx>=0.28.1",
     "websockets>=13.0",
 ]
 
