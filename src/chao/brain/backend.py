@@ -45,7 +45,13 @@ class CircuitBreakerBackend:
         primary: LLMBackend,
         fallback: LLMBackend,
         *,
-        first_token_timeout_s: float = 2.0,
+        # CLAUDE.md's brain/ note says "~2s" — that turned out to be too
+        # tight in practice: a cold Anthropic connection (fresh TLS
+        # handshake, no keep-alive yet) measured ~2.25s to first token on
+        # this network, well within normal variance. 2.0s was tripping the
+        # breaker on a working call, not a slow one. 5s leaves real headroom
+        # while still catching a genuinely stuck/dead primary.
+        first_token_timeout_s: float = 5.0,
     ) -> None:
         self._primary = primary
         self._fallback = fallback
