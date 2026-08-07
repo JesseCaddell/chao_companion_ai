@@ -92,10 +92,10 @@ arrival. Tokens arrive well before the audio they correspond to.
 
 **director/motion.py** — the ball's lag behind the head is now native to the rig: the
 rigger added a dedicated physics group (`xp4`/`yp5`, plus `yp6` for bubble scale) that
-bakes in the damped-spring behavior originally spec'd for this module, confirmed live in
-VTS. No code-side spring needed. Still open: whether that physics group's input can
-actually be driven by the plugin with face tracking off — see `docs/rigging_check_list.md`
-item 1. This is still the highest-value single feature in the project; it just moved out
+bakes in the damped-spring behavior originally spec'd for this module. Confirmed working
+with face tracking off (moving the model in VTS makes the ball lag on its own, no plugin
+binding required) — `docs/rigging_check_list.md` item 1 is resolved. No code-side spring
+needed. This is still the highest-value single feature in the project; it just moved out
 of code and into the rig.
 
 **director/aliveness.py** — runs independently of the LLM at three rates: 60Hz micro, ~1Hz

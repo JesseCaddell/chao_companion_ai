@@ -107,16 +107,11 @@ User confirmed live in VTS that the group has **its own native lag** —
 code. Design doc §8.2/§8.3, `docs/rigging_check_list.md` item 1, and
 CLAUDE.md's `director/motion.py` note are all updated to reflect this.
 
-**Not fully closed.** The physics group needs something to lag *behind*.
-With face tracking off (§7.3), only a plugin-injected parameter can drive
-head motion, and injection can only write custom "tracking" params (phase
-0's error-453 finding) that must be hand-bound in the VTS UI to a Live2D
-output — the same step already done for `happy` in phase 0, not yet
-confirmed done for a head parameter. If it isn't, `xp4`/`yp5` will sit
-still during an autonomous session despite moving fine under a manual
-slider or webcam test. `docs/rigging_check_list.md` item 1 tracks this as
-the remaining open half, targeted for verification before phase 2 (not a
-hard stop for phase 1).
+**Fully closed.** User verified directly: with face tracking off, moving
+the model around in VTS makes the ball visibly lag on its own. The physics
+group reacts to model movement regardless of what's driving it, so no
+plugin-side binding is needed. `docs/rigging_check_list.md` item 1 is
+resolved — nothing left to verify before phase 2 on this front.
 
 §8.3's "faster/slower spring response by mood" is no longer achievable —
 stiffness/damping are now baked into the model's `.physics3.json` at rig
@@ -144,8 +139,3 @@ are unaffected. Doc updated to say so rather than leave it stale.
    before any audio exists — director-level, not bus-level.
 2. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
    priority, quick, not expected to change any conclusion).
-3. Before phase 2: verify the ball physics drive chain
-   (`docs/rigging_check_list.md` item 1) — bind a custom tracking param to
-   a head Live2D output if not already done, inject into it, and confirm
-   `xp4`/`yp5` visibly lag in response with face tracking off. If that bind
-   doesn't exist, the ball won't move during an autonomous session.

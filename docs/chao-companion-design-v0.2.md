@@ -406,7 +406,7 @@ ball_pos += ball_vel * dt
 
 This sells "physical creature with mass" more convincingly than any amount of expression authoring, and it's still always on, during speech and idle and emotes alike, at zero code-side cost. It also pairs with the ball's shape changes: a heart that *swings* into place reads far better than one that appears.
 
-**Open verification (§19.1, `docs/rigging_check_list.md`):** the physics group needs *something* as its driven input to lag behind. With face tracking off (§7.3), that input has to be a plugin-driven parameter. Injection can only write custom "tracking" parameters (phase 0's error-453 finding), which then need a one-time manual bind in the VTS UI to a head Live2D output. If nothing is bound to head motion, the ball won't move during an autonomous session even though it moves fine under a manual slider or webcam test. Confirm this chain — inject into a bound head param and watch `xp4`/`yp5` respond — before relying on it in phase 2.
+**Verified:** with face tracking off, moving the model in VTS makes the ball visibly lag — the physics group reacts on its own to model movement, no plugin-side binding required. `docs/rigging_check_list.md` item 1 is resolved.
 
 ### 8.3 Emotion modulation
 
@@ -752,7 +752,7 @@ The TTS landscape moves quickly; re-evaluate at phase 2 rather than committing n
 
 ## 19. Open questions
 
-1. **Does the ball have independent position parameters?** Yes, as of the rigger's update: `xp4`/`yp5` (ball X/Y) plus `yp6` (bubble scale, unrelated to position), all in a new physics group with lag confirmed live in VTS. The lag is native to the rig's physics — no code-side spring needed for §8.2. Still open: whether that physics group tracks a Live2D output the plugin can actually drive with face tracking off (§7.3), since injection can only write custom tracking params, which then have to be bound by hand to a Live2D output (see the phase 0 error-453 finding). Tracked in `docs/rigging_check_list.md`, targeted for verification at phase 2. Not a hard stop for phases 0-1.
+1. **Does the ball have independent position parameters?** Yes, as of the rigger's update: `xp4`/`yp5` (ball X/Y) plus `yp6` (bubble scale, unrelated to position), all in a new physics group. The lag is native to the rig's physics — no code-side spring needed for §8.2. Verified with face tracking off: moving the model in VTS makes the ball lag on its own, no plugin binding required. `docs/rigging_check_list.md` item 1 is resolved.
 2. **Which emote additions from §6.5 get mapped, and when?** Neutral is blocking for phase 1. Ellipsis is the highest-value optional.
 3. **Should the chao hear game audio?** Reacting to what you're playing is compelling but adds an audio-classification pipeline. Deferred past v1.
 4. **What is the chao's voice?** Piper voice selection at phase 2; pitch shifting may be needed to match the character.
