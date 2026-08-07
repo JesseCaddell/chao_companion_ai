@@ -1,0 +1,154 @@
+"""Turn orchestrator: wires a backend + Director together to satisfy
+bus.py's `TurnHandler`. See design doc §4.3, §13.
+
+`TurnOrchestrator` instances are directly usable as `bus.py`'s
+`turn_handler` (they implement `__call__` with the matching signature).
+Per turn: assemble a Prompt, publish `brain.request`, stream the backend's
+response — publishing `brain.token` per chunk and feeding it to
+`Director.process_chunk` — then publish `brain.complete` and remember the
+exchange for the next turn's recent context.
+
+Not yet real, deliberately: `personality` and `memory` are static strings
+(no mood.py, no memory/store.py — both later phases). Recent conversation
+history is a simple in-process bound list, not persisted — cross-session
+memory is phase 6's job, this is just same-session continuity.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+from chao.brain.backend import LLMBackend
+from chao.brain.prompt import CurrentEvent, EventSource, Prompt, Turn, assemble_prompt
+from chao.director.director import Director
+from chao.events import Event, Kind
+
+_SOURCE_BY_KIND: dict[str, EventSource] = {
+    Kind.INPUT_CHAT: "chat",
+    Kind.INPUT_VOICE: "voice",
+    Kind.INPUT_MANUAL: "manual",
+}
+
+
+@dataclass
+class TurnOrchestrator:
+    backend: LLMBackend
+    director: Director
+    publish: Callable[[Event], None]
+    identity: str = ""
+    personality: str = ""
+    memory: str = ""
+    # Turns, not exchanges (2 Turns/exchange, always appended as a pair) —
+    # keep this even, or a popleft() can strip the pairing and leave
+    # history starting with an assistant Turn, which the Anthropic API
+    # rejects (first message must be "user").
+    history_limit: int = 40
+
+    _history: deque[Turn] = field(default_factory=deque, init=False)
+
+    async def __call__(self, event: Event, cancel: asyncio.Event, turn_id: str) -> None:
+        current_event = _current_event_from(event)
+        prompt = assemble_prompt(
+            identity=self.identity,
+            personality=self.personality,
+            memory=self.memory,
+            recent_context=list(self._history),
+            current_event=current_event,
+        )
+
+        self.publish(
+            Event(
+                kind=Kind.BRAIN_REQUEST,
+                turn_id=turn_id,
+                payload={
+                    "prompt_sections": _non_empty_sections(prompt),
+                    "token_counts": prompt.token_counts,
+                    # Whatever backend was configured — once that's a
+                    # CircuitBreakerBackend this always reads
+                    # "CircuitBreakerBackend", never revealing whether a
+                    # given turn actually fell back to local. This fires
+                    # before streaming starts, so it can't know yet either
+                    # way; a real answer would need the breaker to surface
+                    # it on brain.complete instead.
+                    "backend": type(self.backend).__name__,
+                },
+            )
+        )
+
+        self.director.begin_turn(turn_id)
+        start = time.monotonic()
+        raw_chunks: list[str] = []
+        cleaned_chunks: list[str] = []
+
+        async for chunk in self.backend.stream(prompt.system, prompt.messages, cancel):
+            raw_chunks.append(chunk)
+            self.publish(Event(kind=Kind.BRAIN_TOKEN, turn_id=turn_id, payload={"text": chunk}))
+            cleaned_chunks.extend(self.director.process_chunk(chunk))
+
+        if cancel.is_set():
+            # Aborted mid-stream. Whatever already streamed was legitimate
+            # (its director.tag/emote events already published above) but
+            # the unflushed remainder is abandoned, not completed — no
+            # brain.complete, no history entry. The next turn's
+            # begin_turn() resets Director's buffer, so nothing leaks.
+            return
+
+        final = self.director.end_turn()
+        if final:
+            cleaned_chunks.append(final)
+
+        full_text = "".join(raw_chunks)
+        latency_ms = (time.monotonic() - start) * 1000
+
+        self.publish(
+            Event(
+                kind=Kind.BRAIN_COMPLETE,
+                turn_id=turn_id,
+                payload={
+                    "full_text": full_text,
+                    "latency_ms": latency_ms,
+                    "usage": None,  # not exposed by LLMBackend yet
+                },
+            )
+        )
+
+        # A reply that's empty after tag-stripping (backend yielded nothing,
+        # or the model emitted only a tag) must not become a Message with
+        # empty content — the Anthropic API rejects that with a 400, which
+        # CircuitBreakerBackend would read as a pre-first-token failure and
+        # fall back for every turn from here on, using the same poisoned
+        # history. brain.complete above still reports the real full_text
+        # (possibly ""); only the history entry is skipped.
+        reply = " ".join(c for c in cleaned_chunks if c).strip()
+        if reply:
+            # prompt.messages[-1] is the current event already
+            # wrapped/labelled by assemble_prompt — reused here so
+            # untrusted-chat labelling survives into history instead of
+            # being lost on the next turn.
+            self._history.append(Turn(role="user", text=prompt.messages[-1].content))
+            self._history.append(Turn(role="assistant", text=reply))
+            while len(self._history) > self.history_limit:
+                self._history.popleft()
+
+
+def _current_event_from(event: Event) -> CurrentEvent:
+    source = _SOURCE_BY_KIND.get(event.kind, "manual")
+    speaker = None
+    if source == "chat":
+        speaker = event.payload.get("display_name") or event.payload.get("login")
+    return CurrentEvent(text=event.payload.get("text", ""), source=source, speaker=speaker)
+
+
+def _non_empty_sections(prompt: Prompt) -> list[str]:
+    sections = []
+    if prompt.stable:
+        sections.append("stable")
+    if prompt.dynamic:
+        sections.append("dynamic")
+    if prompt.messages:
+        sections.append("messages")
+    return sections
