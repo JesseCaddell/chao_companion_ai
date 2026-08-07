@@ -1,0 +1,150 @@
+from chao.director.tags import ParsedTag, parse_tags, split_sentences
+
+
+def test_simple_tag_is_parsed_and_stripped():
+    cleaned, tags = parse_tags("[happy] Hi there!")
+
+    assert cleaned == "Hi there!"
+    assert tags == [ParsedTag(name="happy", value=None, sentence_index=0)]
+
+
+def test_trailing_tag_clamps_to_last_sentence_index():
+    """A tag with nothing after it (e.g. a sign-off "[happy]") must not
+    point past the end of split_sentences(cleaned) — that's an IndexError
+    waiting for the director, which schedules against sentence index.
+    """
+    cleaned, tags = parse_tags("Hi. [happy]")
+
+    assert cleaned == "Hi."
+    assert len(split_sentences(cleaned)) == 1
+    assert tags == [ParsedTag(name="happy", value=None, sentence_index=0)]
+
+
+def test_tag_only_input_has_in_range_index_even_with_no_sentences():
+    cleaned, tags = parse_tags("[happy]")
+
+    assert cleaned == ""
+    assert split_sentences(cleaned) == []
+    assert tags == [ParsedTag(name="happy", value=None, sentence_index=0)]
+
+
+def test_two_tags_two_sentences():
+    cleaned, tags = parse_tags("[happy] Oh you're back. [sad] You said five minutes.")
+
+    assert cleaned == "Oh you're back. You said five minutes."
+    assert tags == [
+        ParsedTag(name="happy", value=None, sentence_index=0),
+        ParsedTag(name="sad", value=None, sentence_index=1),
+    ]
+
+
+def test_design_doc_example():
+    """Literal §9 example. "Oh!" and "You're back!" each end in a sentence
+    terminator, so the simple `.!?`-based splitter counts them as two
+    sentences — that's an accepted simplification (no abbreviation/
+    interjection handling), not a bug to special-case.
+    """
+    cleaned, tags = parse_tags("[happy] Oh! You're back! [sad] You said five minutes.")
+
+    assert cleaned == "Oh! You're back! You said five minutes."
+    assert tags == [
+        ParsedTag(name="happy", value=None, sentence_index=0),
+        ParsedTag(name="sad", value=None, sentence_index=2),
+    ]
+
+
+def test_unknown_tag_name_is_stripped_but_not_emitted():
+    cleaned, tags = parse_tags("[proud] Nice work.")
+
+    assert cleaned == "Nice work."
+    assert tags == []
+
+
+def test_look_tag_with_known_target():
+    cleaned, tags = parse_tags("[look:chat] Hey chat!")
+
+    assert cleaned == "Hey chat!"
+    assert tags == [ParsedTag(name="look", value="chat", sentence_index=0)]
+
+
+def test_look_tag_with_unknown_target_is_dropped():
+    cleaned, tags = parse_tags("[look:streamer] Hi")
+
+    assert cleaned == "Hi"
+    assert tags == []
+
+
+def test_known_name_with_unexpected_value_is_dropped():
+    cleaned, tags = parse_tags("[happy:very] Hi")
+
+    assert cleaned == "Hi"
+    assert tags == []
+
+
+def test_pause_tag_is_recognized():
+    _, tags = parse_tags("Hold on [pause] really?")
+
+    assert tags == [ParsedTag(name="pause", value=None, sentence_index=0)]
+
+
+def test_case_insensitive_tag_name():
+    cleaned, tags = parse_tags("[HAPPY] Hi")
+
+    assert cleaned == "Hi"
+    assert tags == [ParsedTag(name="happy", value=None, sentence_index=0)]
+
+
+def test_unclosed_bracket_is_left_as_text_and_does_not_crash():
+    text = "[happy Hi there, no closing bracket"
+
+    cleaned, tags = parse_tags(text)
+
+    assert cleaned == text
+    assert tags == []
+
+
+def test_multiword_bracketed_text_is_left_untouched():
+    text = "She said [laughs nervously] and left."
+
+    cleaned, tags = parse_tags(text)
+
+    assert cleaned == text
+    assert tags == []
+
+
+def test_text_with_no_tags_is_unchanged_aside_from_whitespace():
+    cleaned, tags = parse_tags("Just a normal sentence.")
+
+    assert cleaned == "Just a normal sentence."
+    assert tags == []
+
+
+def test_extra_whitespace_is_collapsed():
+    cleaned, _ = parse_tags("[happy]   Hi   there.")
+
+    assert cleaned == "Hi there."
+
+
+def test_never_crashes_on_garbage_input():
+    garbage_inputs = [
+        "",
+        "[[[[[",
+        "]]]]]",
+        "[:]",
+        "[]",
+        "[" * 500,
+        "[happy][sad][curious][look:chat][bogus:thing]",
+        "\n\n\t[happy]\n\n",
+    ]
+    for text in garbage_inputs:
+        cleaned, tags = parse_tags(text)
+        assert isinstance(cleaned, str)
+        assert isinstance(tags, list)
+
+
+def test_split_sentences_basic():
+    assert split_sentences("One. Two! Three?") == ["One.", "Two!", "Three?"]
+
+
+def test_split_sentences_empty_string():
+    assert split_sentences("") == []
