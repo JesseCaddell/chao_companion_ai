@@ -20,15 +20,45 @@ reactions stay unblocked). 9 tests passing, ruff clean. Added `pytest`,
 `pytest-asyncio`, `ruff` as dev dependencies (weren't in `pyproject.toml`
 before this session).
 
-**The required Opus review of this design has not happened yet** — the
-`advisor` tool was overloaded every time it was tried this session (4
-attempts across the session). Per CLAUDE.md's working-style rule, the
-`Event`/bus contract is supposed to get that review before other code
-builds on it. User explicitly chose "draft now, review later" when asked.
-Full writeup of the judgment calls that need checking is in
-`docs/event_bus_design.md` — **read that file first next session** and try
-`advisor()` again before writing `brain/`, `director/`, or wiring
-`__main__.py` to a real `turn_handler`.
+**The deferred Opus review of the event/bus design happened at the start of
+this session** and found three real bugs beyond the five judgment calls
+flagged for review, plus confirmed one of those five was itself a bug:
+
+- Turn-triggering events (`input.chat`/`voice`/`manual`) were never fanned
+  out to subscribers — only their derived `decision.*` events were, breaking
+  invariant 4's "one stream, three consumers" and losing the raw input a
+  prompt re-run would need. Fixed: `publish()` now fans out turn-triggering
+  events too, minting `turn_id` at arrival (not selection) so drops
+  correlate back to the input that produced them.
+- §4.1 chat tiers 4-5 (`CHAT_BACKGROUND`) could still win an empty turn slot
+  and produce a full spoken response, contradicting the "no full response"
+  spec for those tiers. Fixed: `input.chat` scored `CHAT_BACKGROUND` now
+  bypasses arbitration entirely, routed like `input.ambient`.
+- Preemption teardown had a 2s grace period but never actually stopped a
+  turn that ignored its cancel token past that point — it kept running
+  concurrently with the new turn. Fixed: `_await_current_teardown` now
+  hard-cancels via `task.cancel()` once the grace period elapses, using
+  `asyncio.wait` (not `wait_for`) so the timeout can't be confused with
+  cancelling the task itself.
+- Cooldown was checked *after* preemption, so a candidate that would itself
+  be dropped by cooldown could still tear down the currently running turn
+  first. Fixed: cooldown check now runs before the busy/preemption check.
+- Kill switch didn't drain the queue, so a backlog could flood through on
+  `revive()`. Fixed.
+
+Full outcomes (including the two confirmed-as-designed judgment calls —
+ambient bypassing arbitration, cooldown exempting voice/manual) are written
+up in `docs/event_bus_design.md`, which no longer carries "pending review"
+framing. 13 tests passing (up from 9), ruff clean.
+
+**Environment note for next session:** `uv run` (and pipes like `| tail` or
+`| tee`) were extremely slow/unresponsive this session — turned out to be a
+stale `.venv/.lock` left by an earlier force-killed `uv` process, not an
+actual code hang, and it cost significant time to isolate (thank the
+`advisor` catch for it). If `uv run pytest` seems to hang, check for stray
+`python`/`uv` processes and a stale `.venv/.lock` before assuming the code
+is broken — invoke pytest directly via `.venv/Scripts/python.exe -u -m
+pytest` (no pipes) to get a fast, honest signal.
 
 ## What Phase 0 proved
 
@@ -81,17 +111,12 @@ The rig's confirmed parameter groups, for reference:
 
 ## Next actions
 
-1. Get the deferred Opus review of `docs/event_bus_design.md` (retry
-   `advisor()`), specifically the 5 flagged judgment calls — ambient
-   bypassing arbitration, the collapsed 3-tier chat priority, the 2s
-   preemption teardown timeout, cooldown exempting voice, and the injected
-   `turn_handler` shape.
-2. Continue Phase 1: `brain/` (LLM backend protocol + prompt assembly),
+1. Continue Phase 1: `brain/` (LLM backend protocol + prompt assembly),
    `director/tags.py` (tolerant tag parser) and `director/director.py`
    (wires tag stream → mood/emote decisions), then `__main__.py` to wire a
    real `turn_handler` into `Bus.run()`, then the dashboard skeleton
    (FastAPI + websocket subscriber) so turns are visible live. Anticipation
    nudge (§10.5) needs `brain.request` to fire the question-mark ball pop
    before any audio exists — director-level, not bus-level.
-3. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
+2. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
    priority, quick, not expected to change any conclusion).

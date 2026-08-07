@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import IntEnum
 
 from chao.events import Event, Kind, new_id
@@ -72,11 +72,12 @@ class _CurrentTurn:
 
 
 class Bus:
-    def __init__(self, *, speech_cooldown_s: float = 15.0) -> None:
+    def __init__(self, *, speech_cooldown_s: float = 15.0, teardown_timeout_s: float = 2.0) -> None:
         self._queue: asyncio.Queue[Event] = asyncio.Queue()
         self._subscribers: list[asyncio.Queue[Event]] = []
         self._current: _CurrentTurn | None = None
         self._speech_cooldown_s = speech_cooldown_s
+        self._teardown_timeout_s = teardown_timeout_s
         self._last_speech_end: float | None = None
         self._killed = asyncio.Event()
 
@@ -88,10 +89,26 @@ class Bus:
 
     def publish(self, event: Event) -> None:
         """Entry point for every producer (inputs/, director/, outputs/, vts.py)."""
-        if event.kind in TURN_TRIGGERING_KINDS:
-            self._queue.put_nowait(event)
-        else:
+        if event.kind not in TURN_TRIGGERING_KINDS:
             self._fan_out(event)
+            return
+
+        # turn_id is minted here, at arrival, not at selection — so a
+        # decision.dropped event can still correlate back to the raw input
+        # that produced it (both fanned out under the same turn_id).
+        if event.turn_id is None:
+            event = replace(event, turn_id=new_id())
+
+        # §4.1 tiers 4-5 ("velocity spike" / "everything else") never earn a
+        # full spoken response. Left in the arbitrated lane, an idle turn
+        # slot would let one win anyway. Route it like input.ambient instead:
+        # fanned out for director/log consumers, never queued for a turn.
+        if event.kind == Kind.INPUT_CHAT and self.priority_of(event) == Priority.CHAT_BACKGROUND:
+            self._fan_out(event)
+            return
+
+        self._fan_out(event)
+        self._queue.put_nowait(event)
 
     def _fan_out(self, event: Event) -> None:
         for q in self._subscribers:
@@ -112,11 +129,14 @@ class Bus:
 
     def kill(self) -> None:
         """Physical kill switch (design doc §15): cancel in-flight turn now,
-        block new turns until `revive()`.
+        block new turns until `revive()`, and drop anything already queued so
+        a backlog can't flood through the instant `revive()` runs.
         """
         self._killed.set()
         if self._current is not None:
             self._current.cancel.set()
+        while not self._queue.empty():
+            self._queue.get_nowait()
 
     def revive(self) -> None:
         self._killed.clear()
@@ -137,6 +157,20 @@ class Bus:
             )
             return
 
+        # Checked before preemption: a candidate that's about to be dropped
+        # by cooldown must never tear down the currently running turn first.
+        if self._last_speech_end is not None and priority < Priority.VOICE:
+            remaining = self._speech_cooldown_s - (event.ts - self._last_speech_end)
+            if remaining > 0:
+                self.publish(
+                    Event(
+                        kind=Kind.DECISION_DROPPED,
+                        payload={"reason": "cooldown", "cooldown_remaining": remaining},
+                        turn_id=event.turn_id,
+                    )
+                )
+                return
+
         if self._current is not None:
             if priority > self._current.priority:
                 self._current.cancel.set()
@@ -146,18 +180,6 @@ class Bus:
                     Event(
                         kind=Kind.DECISION_DROPPED,
                         payload={"reason": "busy", "priority": int(priority)},
-                        turn_id=event.turn_id,
-                    )
-                )
-                return
-
-        if self._last_speech_end is not None and priority < Priority.VOICE:
-            remaining = self._speech_cooldown_s - (event.ts - self._last_speech_end)
-            if remaining > 0:
-                self.publish(
-                    Event(
-                        kind=Kind.DECISION_DROPPED,
-                        payload={"reason": "cooldown", "cooldown_remaining": remaining},
                         turn_id=event.turn_id,
                     )
                 )
@@ -192,9 +214,16 @@ class Bus:
     async def _await_current_teardown(self) -> None:
         if self._current is None:
             return
-        try:
-            await asyncio.wait_for(self._current.task, timeout=2.0)
-        except TimeoutError:
-            logger.warning("turn %s did not honor cancellation within 2s", self._current.turn_id)
-        except asyncio.CancelledError:
-            pass
+        turn_id = self._current.turn_id
+        task = self._current.task
+        # asyncio.wait never touches `task`'s own cancellation, so a timeout
+        # here can't accidentally cancel it early — only the explicit
+        # task.cancel() below, once the grace period is actually up, does.
+        done, _ = await asyncio.wait({task}, timeout=self._teardown_timeout_s)
+        if not done:
+            logger.warning(
+                "turn %s did not honor cancellation within %.1fs; hard-cancelling",
+                turn_id,
+                self._teardown_timeout_s,
+            )
+            task.cancel()

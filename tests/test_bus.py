@@ -84,7 +84,7 @@ async def test_lower_priority_dropped_while_busy(bus: Bus):
     bus.publish(make_chat(priority=1))  # CHAT_DIRECT, occupies the turn
     await asyncio.sleep(0)
 
-    bus.publish(make_chat(priority=5))  # CHAT_BACKGROUND, should be dropped
+    bus.publish(make_chat(priority=3))  # CHAT_ENGAGEMENT, still arbitrated, should be dropped
     await asyncio.sleep(0)
 
     release.set()
@@ -98,19 +98,110 @@ async def test_lower_priority_dropped_while_busy(bus: Bus):
 async def test_higher_priority_preempts_and_cancels(bus: Bus):
     sub = bus.subscribe()
     first_cancelled = asyncio.Event()
+    manual_handled = asyncio.Event()
 
     async def handler(event, cancel, turn_id):
-        if event.payload.get("priority") == 5:  # the low-priority first turn
-            await cancel.wait()
-            first_cancelled.set()
+        if event.kind == Kind.INPUT_MANUAL:
+            manual_handled.set()
+            return
+        await cancel.wait()
+        first_cancelled.set()
 
     task = asyncio.create_task(bus.run(handler))
-    bus.publish(make_chat(priority=5))  # CHAT_BACKGROUND
+    bus.publish(make_chat(priority=3))  # CHAT_ENGAGEMENT
     await asyncio.sleep(0)
 
     bus.publish(make_manual())  # MANUAL always outranks chat
     await asyncio.wait_for(first_cancelled.wait(), timeout=1.0)
+    # first_cancelled fires as soon as turn 1 observes its cancel token, which
+    # can race ahead of the bus actually creating turn 2 — wait for that too
+    # rather than a fixed number of scheduler ticks.
+    await asyncio.wait_for(manual_handled.wait(), timeout=1.0)
+
+    await stop(task)
+    selected = [e for e in await drain(sub) if e.kind == Kind.DECISION_SELECTED]
+    assert len(selected) == 2
+
+
+async def test_chat_background_bypasses_arbitration(bus: Bus):
+    """§4.1 tiers 4-5 must never win an empty turn slot into a full response."""
+    sub = bus.subscribe()
+    called = False
+
+    async def handler(event, cancel, turn_id):
+        nonlocal called
+        called = True
+
+    bus.publish(make_chat(priority=5))  # CHAT_BACKGROUND
     await asyncio.sleep(0)
+
+    assert not called
+    seen = [e.kind for e in await drain(sub)]
+    assert seen == [Kind.INPUT_CHAT]
+
+
+async def test_turn_triggering_input_is_fanned_out(bus: Bus):
+    """Raw inputs must reach subscribers too, not just their derived decisions
+    (CLAUDE.md invariant 4: one stream, three consumers)."""
+    sub = bus.subscribe()
+
+    async def handler(event, cancel, turn_id):
+        return
+
+    task = asyncio.create_task(bus.run(handler))
+    bus.publish(make_manual())
+    await asyncio.sleep(0)
+    await stop(task)
+
+    events = await drain(sub)
+    manual = next(e for e in events if e.kind == Kind.INPUT_MANUAL)
+    selected = next(e for e in events if e.kind == Kind.DECISION_SELECTED)
+    assert manual.turn_id is not None
+    assert manual.turn_id == selected.turn_id
+
+
+async def test_cooldown_checked_before_preemption(bus: Bus):
+    """A candidate that will be dropped by cooldown must not tear down the
+    turn that's currently running."""
+    sub = bus.subscribe()
+    cancelled = asyncio.Event()
+
+    async def handler(event, cancel, turn_id):
+        await cancel.wait()
+        cancelled.set()
+
+    task = asyncio.create_task(bus.run(handler))
+    bus.mark_speech_end(0.0)
+    bus.publish(make_chat(priority=2, ts=0.0))  # CHAT_ENGAGEMENT, occupies the turn
+    await asyncio.sleep(0)
+
+    # Higher priority than the current turn, but inside the cooldown window.
+    bus.publish(make_chat(priority=1, ts=1.0))  # CHAT_DIRECT
+    await asyncio.sleep(0)
+
+    assert not cancelled.is_set()
+
+    await stop(task)
+    dropped = [e for e in await drain(sub) if e.kind == Kind.DECISION_DROPPED]
+    assert any(e.payload["reason"] == "cooldown" for e in dropped)
+
+
+async def test_stuck_turn_is_hard_cancelled_after_teardown_timeout():
+    bus = Bus(speech_cooldown_s=15.0, teardown_timeout_s=0.05)
+    sub = bus.subscribe()
+    stuck_started = asyncio.Event()
+
+    async def handler(event, cancel, turn_id):
+        if event.payload.get("priority") == 3:
+            stuck_started.set()
+            await asyncio.sleep(10)  # ignores the cancel token entirely
+
+    task = asyncio.create_task(bus.run(handler))
+    bus.publish(make_chat(priority=3))  # CHAT_ENGAGEMENT
+    await asyncio.wait_for(stuck_started.wait(), timeout=1.0)
+
+    bus.publish(make_manual())  # preempts, then must hard-cancel after 0.05s
+    await asyncio.sleep(0.2)
 
     await stop(task)
     selected = [e for e in await drain(sub) if e.kind == Kind.DECISION_SELECTED]
