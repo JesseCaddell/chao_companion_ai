@@ -304,6 +304,48 @@ loading `config/identity.md`/`emotes.yaml`, calling `Bus.run`) and a VTS
 subscriber for `director.emote` — everything else in the chain is real
 code, not a stub.
 
+## `__main__.py` — live entry point (session 3, cont'd)
+
+`build_pipeline(*, identity, emote_config, backend) -> (Bus, TurnOrchestrator)`
+holds the dependency-injected wiring (tested with fakes in
+`test_main.py`); `main()` owns the real I/O — reads
+`config/identity.md`/`config/emotes.yaml`, constructs
+`CircuitBreakerBackend(AnthropicBackend(), OllamaBackend(...))`, and runs
+`Bus.run(orchestrator)` against typed stdin. Typed lines become
+`input.manual` events; a `_print_events` subscriber stands in for the
+not-yet-built dashboard/JSONL log, printing streamed tokens, latency,
+emote firings, and drops. This is `uv run python -m chao` — the first
+live-runnable slice of phase 1, proven by direct construction against
+the real config files (not just fakes): imports, `AnthropicBackend()`,
+`OllamaBackend(...)`, `CircuitBreakerBackend`, and
+`load_emote_config(EMOTES_PATH)` all succeed, and the emote pools load
+correctly from the real `config/emotes.yaml`.
+
+Populated `config/identity.md` with an operational placeholder
+(temperament + the tag vocabulary from `director/tags.py`, explicitly
+labelled a stub pending the real Opus-reviewed character sheet) — an
+advisor review flagged that with the file empty, the prompt gave the
+model no reason to ever emit a tag, so the live smoke test would look
+like a working chat loop with a silently dead emote pipeline. The two
+other findings from that review were fixed before commit: `main()` now
+fails fast with a clear message if `ANTHROPIC_API_KEY` isn't set
+(previously the error surfaced three layers deep as a generic
+circuit-breaker fallback failure, after the user had already typed);
+shutdown now calls `bus.kill()` before cancelling the run/console tasks
+so the in-flight turn's cancel token is set and it exits cleanly instead
+of being hard-cancelled mid-await.
+
+**Ollama is not installed on this machine yet** — the local fallback
+path uses a placeholder model name (`llama3.1:8b-instruct-q4_K_M`,
+override via `CHAO_OLLAMA_MODEL`) and is untested against a real server.
+If cloud fails and it falls back, expect a connection error, not a
+response. `config/chao.yaml` is still empty/unread — the Anthropic model
+choice stays a `cloud.py` constant, not yet configurable.
+
+83 tests passing (up from 81), ruff clean. Not yet run live against the
+real Anthropic API in this session (needs `ANTHROPIC_API_KEY` set and
+spends credits) — wiring is verified, live behavior isn't.
+
 ## Standing decisions made this session
 
 - Git remote confirmed on `jesse-github` SSH alias (see CLAUDE.md's GitHub
@@ -316,22 +358,26 @@ code, not a stub.
 
 ## Next actions
 
-1. Continue Phase 1: `__main__.py` to wire everything built this session
-   into a runnable process — load `config/identity.md` (still a stub) and
-   `config/emotes.yaml`, construct the real backends
-   (`CircuitBreakerBackend(AnthropicBackend(...), OllamaBackend(...))`),
-   build a `TurnOrchestrator` + `Director`, and call `Bus.run(orchestrator)`
-   with some real input source (even just stdin → `input.manual` is enough
-   to prove it end-to-end live). Then the dashboard skeleton (FastAPI +
-   websocket subscriber) so turns are visible without reading logs.
-2. A subscriber that turns `director.emote` into real VTS
+1. Actually run `uv run python -m chao` live with `ANTHROPIC_API_KEY` set —
+   this hasn't happened yet this session, so the pipeline is wiring-verified
+   but not behavior-verified against the real API. Watch for whether `[tag]`
+   placement/frequency from the placeholder identity.md prompt is usable, and
+   whether `system=""` edge cases matter (they shouldn't now that
+   identity.md has content, but worth noting if something looks off).
+2. Then the dashboard skeleton (FastAPI + websocket subscriber) so turns are
+   visible without reading console output — `_print_events` in `__main__.py`
+   is a throwaway stand-in, not meant to survive.
+3. A subscriber that turns `director.emote` into real VTS
    `ExpressionActivationRequest` calls (outputs/vts.py currently only has
-   the thin transport client from phase 0). Blocked on action 3.
-3. Before that: confirm `config/emotes.yaml`'s hotkey names (`chao.happy`
+   the thin transport client from phase 0). Blocked on action 4.
+4. Before that: confirm `config/emotes.yaml`'s hotkey names (`chao.happy`
    etc.) against this model's actual VTS hotkey list — they're copied from
    the design doc's example, unverified.
-4. Anticipation nudge (§10.5) needs something subscribing to
+5. Anticipation nudge (§10.5) needs something subscribing to
    `brain.request` to pop the question-mark ball before audio exists —
    that's aliveness.py's job, not yet built.
-5. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
+6. If/when Ollama gets installed, pull a real model and set
+   `CHAO_OLLAMA_MODEL` (or update `DEFAULT_OLLAMA_MODEL` in `__main__.py`) —
+   the fallback path is currently untested against a real server.
+7. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
    priority, quick, not expected to change any conclusion).
