@@ -386,6 +386,28 @@ breaker's timeout behavior via explicit values), ruff clean.
   motion, ~1/3s settle, not the ball detaching or roaming) — not being
   dropped, just deferred pending a rigging fix.
 
+## config/emotes.yaml confirmed against live VTS (session 3, cont'd)
+
+Queried the running VTS instance directly (`ExpressionStateRequest` +
+`HotkeysInCurrentModelRequest`) and replaced the placeholder `chao.*`
+names with the real expression file names. All 7 tag-mapped pools plus
+`fly` have a matching `<name>.exp3.json` file and a 1:1 hotkey:
+
+- Confirmed: `happy`, `heart`, `question` (curious pool), `surprise`,
+  `confused`, `sad`, `angry`, `fly` — all exist. `happy.exp3.json`
+  visually verified firing live via `ExpressionActivationRequest`.
+- **`neutral` genuinely does not exist in VTS** — not just unverified,
+  actually missing. Nothing currently fires it (no tag maps to
+  `"neutral"` in `director.py`'s `_TAG_TO_POOL`), so `hotkeys: []` is
+  safe as a placeholder. **User still needs to author a default-state
+  expression in VTS** before neutral can be wired to anything — that's
+  on the user, not blocked on code.
+
+Per CLAUDE.md's phase-0 finding, the config's `hotkeys:` key holds
+expression FILE names (for `ExpressionActivationRequest`), not literal
+VTS hotkey labels — a 1:1 hotkey exists per expression too, but firing
+should go through the expression file, not `HotkeyTriggerRequest`.
+
 ## Next actions
 
 1. The dashboard skeleton (FastAPI + websocket subscriber) so turns are
@@ -393,10 +415,10 @@ breaker's timeout behavior via explicit values), ruff clean.
    is a throwaway stand-in, not meant to survive.
 2. A subscriber that turns `director.emote` into real VTS
    `ExpressionActivationRequest` calls (outputs/vts.py currently only has
-   the thin transport client from phase 0). Blocked on action 3.
-3. Before that: confirm `config/emotes.yaml`'s hotkey names (`chao.happy`
-   etc.) against this model's actual VTS hotkey list — they're copied from
-   the design doc's example, unverified.
+   the thin transport client from phase 0) — unblocked now that
+   `config/emotes.yaml`'s names are confirmed.
+3. User: author a default-state `neutral` expression in VTS, then add its
+   file name to `config/emotes.yaml`'s `neutral` pool.
 4. Anticipation nudge (§10.5) needs something subscribing to
    `brain.request` to pop the question-mark ball before audio exists —
    that's aliveness.py's job, not yet built.
