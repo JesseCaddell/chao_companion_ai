@@ -256,6 +256,54 @@ Advisor review caught two real bugs before commit:
 
 68 tests passing (up from 48), ruff clean.
 
+## brain/turn.py — the turn orchestrator (session 3, cont'd)
+
+`TurnOrchestrator` is the piece that finally satisfies `bus.py`'s
+`TurnHandler` — instances implement `__call__(event, cancel, turn_id)`
+matching that signature directly, so `Bus.run(orchestrator)` just works
+(proven with a real `Bus` in `test_works_as_a_real_bus_turn_handler`, not
+just direct calls). Per turn: derive a `CurrentEvent` from the triggering
+input (`input.chat`→source="chat"+speaker from display_name/login,
+`input.voice`→"voice", else "manual"), `assemble_prompt`, publish
+`brain.request` immediately after (as early as possible, for §10.5's
+anticipation nudge once aliveness.py exists to consume it), stream the
+backend publishing `brain.token` per **raw** chunk (tags included — that's
+the faithful record) while feeding each chunk to `Director.process_chunk`,
+then `Director.end_turn()` to flush the remainder, then `brain.complete`
+with `full_text`/`latency_ms`/`usage` (`usage: None` always — not exposed
+by the `LLMBackend` protocol yet, a documented gap not a bug).
+
+Recent conversation history is a simple in-process bounded `deque[Turn]`
+(default cap 40, must stay even — see comment on `history_limit`), not
+persisted; cross-session memory is still phase 6. `personality`/`memory`
+are static constructor strings for now, pending `mood.py` and
+`memory/store.py`. History reuses `prompt.messages[-1].content` (the
+already-wrapped/labelled current event) for the "user" turn rather than
+re-wrapping raw text, so untrusted-chat labelling survives into future
+turns' recent context instead of being lost.
+
+Advisor review caught one real bug before commit, plus a real test gap:
+- A reply that's empty after tag-stripping (backend yields nothing, or
+  the model emits only a tag, e.g. `"[happy]"` → cleaned `""`) was still
+  appended to history as an empty-content `Message`. The Anthropic API
+  rejects empty message content with a 400; `CircuitBreakerBackend` reads
+  that as a pre-first-token failure and falls back to local — for every
+  turn from then on, since the poisoned empty Turn stays in history. The
+  session doesn't recover without a restart. Fixed: the history append
+  (not `brain.complete`, which still reports the real `full_text`,
+  possibly `""`) is skipped when the cleaned reply is empty.
+- Every test called the orchestrator directly; nothing proved the
+  headline claim (works as a real `TurnHandler`). Added
+  `test_works_as_a_real_bus_turn_handler` against an actual `Bus.run()`.
+
+81 tests passing (up from 68), ruff clean. **Phase 1's core pipeline is
+now wired end-to-end**: typed/chat/voice input → `Bus` arbitration →
+`TurnOrchestrator` → backend → `Director` → tag/emote events. What's
+missing before it's runnable live is `__main__.py` (wiring real backends,
+loading `config/identity.md`/`emotes.yaml`, calling `Bus.run`) and a VTS
+subscriber for `director.emote` — everything else in the chain is real
+code, not a stub.
+
 ## Standing decisions made this session
 
 - Git remote confirmed on `jesse-github` SSH alias (see CLAUDE.md's GitHub
@@ -268,17 +316,22 @@ Advisor review caught two real bugs before commit:
 
 ## Next actions
 
-1. Continue Phase 1: the `brain/` turn orchestrator that satisfies
-   `bus.py`'s `TurnHandler` — assembles a `Prompt`, publishes
-   `brain.request`/`token`/`complete`, calls a backend, feeds tokens into
-   `Director.process_chunk`/`end_turn`. Then `__main__.py` to wire it into
-   `Bus.run()`, then the dashboard skeleton (FastAPI + websocket
-   subscriber) so turns are visible live. Anticipation nudge (§10.5) needs
-   `brain.request` to fire the question-mark ball pop before any audio
-   exists — director-level, not bus-level.
-2. Before outputs/vts.py subscribes to `director.emote`: confirm
-   `config/emotes.yaml`'s hotkey names (`chao.happy` etc.) against this
-   model's actual VTS hotkey list — they're copied from the design doc's
-   example, unverified.
-3. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
+1. Continue Phase 1: `__main__.py` to wire everything built this session
+   into a runnable process — load `config/identity.md` (still a stub) and
+   `config/emotes.yaml`, construct the real backends
+   (`CircuitBreakerBackend(AnthropicBackend(...), OllamaBackend(...))`),
+   build a `TurnOrchestrator` + `Director`, and call `Bus.run(orchestrator)`
+   with some real input source (even just stdin → `input.manual` is enough
+   to prove it end-to-end live). Then the dashboard skeleton (FastAPI +
+   websocket subscriber) so turns are visible without reading logs.
+2. A subscriber that turns `director.emote` into real VTS
+   `ExpressionActivationRequest` calls (outputs/vts.py currently only has
+   the thin transport client from phase 0). Blocked on action 3.
+3. Before that: confirm `config/emotes.yaml`'s hotkey names (`chao.happy`
+   etc.) against this model's actual VTS hotkey list — they're copied from
+   the design doc's example, unverified.
+4. Anticipation nudge (§10.5) needs something subscribing to
+   `brain.request` to pop the question-mark ball before audio exists —
+   that's aliveness.py's job, not yet built.
+5. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
    priority, quick, not expected to change any conclusion).
