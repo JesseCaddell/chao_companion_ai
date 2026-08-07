@@ -393,7 +393,7 @@ Routed to:
 
 ### 8.2 Ball spring (highest-value single feature)
 
-Do not drive the ball directly. Run it through a damped spring so it **lags** the head:
+**Update:** the rigger added a dedicated physics group for the ball (`xp4`/`yp5`) with the lag below baked in natively — confirmed live in VTS. The pseudocode is kept here as the *behavioral spec* the rig now satisfies, not code we still need to write:
 
 ```
 ball_target = head_position
@@ -402,13 +402,17 @@ ball_vel += accel * dt
 ball_pos += ball_vel * dt
 ```
 
-Starting values: `stiffness ≈ 120`, `damping ≈ 14`, at 60Hz. Tune until it overshoots slightly and settles in roughly a third of a second.
+(Originally: `stiffness ≈ 120`, `damping ≈ 14`, at 60Hz, tuned to overshoot slightly and settle in roughly a third of a second — now the rigger's call, baked into the model's `.physics3.json`.)
 
-This sells "physical creature with mass" more convincingly than any amount of expression authoring. It runs during speech, idle, and emotes — always on, near-zero cost. It also pairs with the ball's shape changes: a heart that *swings* into place reads far better than one that appears.
+This sells "physical creature with mass" more convincingly than any amount of expression authoring, and it's still always on, during speech and idle and emotes alike, at zero code-side cost. It also pairs with the ball's shape changes: a heart that *swings* into place reads far better than one that appears.
+
+**Open verification (§19.1, `docs/rigging_check_list.md`):** the physics group needs *something* as its driven input to lag behind. With face tracking off (§7.3), that input has to be a plugin-driven parameter. Injection can only write custom "tracking" parameters (phase 0's error-453 finding), which then need a one-time manual bind in the VTS UI to a head Live2D output. If nothing is bound to head motion, the ball won't move during an autonomous session even though it moves fine under a manual slider or webcam test. Confirm this chain — inject into a bound head param and watch `xp4`/`yp5` respond — before relying on it in phase 2.
 
 ### 8.3 Emotion modulation
 
-The same envelope maps differently by mood. High arousal → larger bob amplitude, faster spring response. Low valence → smaller amplitude, slower response, downward posture offset. One signal, many readings.
+The same envelope maps differently by mood. High arousal → larger bob amplitude. Low valence → smaller amplitude, downward posture offset. One signal, many readings.
+
+**Update:** "faster/slower spring response" by mood is no longer achievable — since §8.2's spring moved into the rig's native physics, its stiffness/damping are baked into the model file at rig time, not exposed by the VTS API for runtime modulation. Amplitude and posture offset (this section's other two levers) are unaffected, since those come from how far we drive the head/body, which the physics group then lags behind.
 
 ---
 
@@ -748,7 +752,7 @@ The TTS landscape moves quickly; re-evaluate at phase 2 rather than committing n
 
 ## 19. Open questions
 
-1. **Does the ball have independent position parameters?** Resolved by the phase 0 diagnostic: no. Confirmed by direct parameter testing in VTS and a live head-drag test showing no inherent lag. §8.2 is a rigging task, tracked in `docs/rigging_check_list.md`, scheduled before phase 2. Not a hard stop for phases 0-1.
+1. **Does the ball have independent position parameters?** Yes, as of the rigger's update: `xp4`/`yp5` (ball X/Y) plus `yp6` (bubble scale, unrelated to position), all in a new physics group with lag confirmed live in VTS. The lag is native to the rig's physics — no code-side spring needed for §8.2. Still open: whether that physics group tracks a Live2D output the plugin can actually drive with face tracking off (§7.3), since injection can only write custom tracking params, which then have to be bound by hand to a Live2D output (see the phase 0 error-453 finding). Tracked in `docs/rigging_check_list.md`, targeted for verification at phase 2. Not a hard stop for phases 0-1.
 2. **Which emote additions from §6.5 get mapped, and when?** Neutral is blocking for phase 1. Ellipsis is the highest-value optional.
 3. **Should the chao hear game audio?** Reacting to what you're playing is compelling but adds an audio-classification pipeline. Deferred past v1.
 4. **What is the chao's voice?** Piper voice selection at phase 2; pitch shifting may be needed to match the character.

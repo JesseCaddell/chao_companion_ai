@@ -81,23 +81,47 @@ instance and confirmed both output channels end-to-end:
   separate parameters, matching the two-channel expression model in
   CLAUDE.md/design doc §6.
 
-**Design doc §19 open question 1 resolved: the ball has no independent
-position parameter.** Every position-shaped candidate parameter (`xp`, `xp2`,
-`xp3`, `yp3`, `yp4`) was slider-tested directly in VTS with no visible motion,
-and a live head-drag/webcam test showed no inherent lag on the ball or its
-aura either — the rig doesn't spring it on its own. This means §8.2's damped
-ball spring has no parameter to drive; it's a rigging gap, not a code gap.
-Logged as the first (only) entry in `docs/rigging_check_list.md`, targeted
-for before Phase 2, **not a hard stop** — the user has artist access to get
-a position parameter added when it's needed.
+**Design doc §19 open question 1, originally resolved "no" this phase, was
+overturned by the rigger two sessions later — see below.** At the time:
+every position-shaped candidate parameter (`xp`, `xp2`, `xp3`, `yp3`, `yp4`)
+was slider-tested directly in VTS with no visible motion, and a live
+head-drag/webcam test showed no inherent lag on the ball or its aura either.
+Logged as the first entry in `docs/rigging_check_list.md`.
 
 The rig's confirmed parameter groups, for reference:
 - Eyes/mood: `happy`, `sad`, `angry`, `confused`
 - Ball icon content: `heart`, `questionm`, `surprise`, `swirl`, `emote`
 - Ball aura visibility: `bubble`, `bubble2`, `hidebub`
+- Ball position (added later, see below): `xp4` (X), `yp5` (Y), `yp6`
+  (bubble scale)
 - Untested and likely irrelevant: `Param`–`Param5` (auto-generated names,
   never slider-tested — low priority, flagged by advisor as a minor gap in
   full enumeration but not expected to change the conclusion)
+
+## Rigger added a ball physics group (session 3)
+
+The artist added a dedicated physics group to the model: `xp4`/`yp5` (ball
+X/Y) and `yp6` (bubble scale, −1..1 shrink/grow, unrelated to position).
+User confirmed live in VTS that the group has **its own native lag** —
+§8.2's damped spring is now baked into the rig, not something we drive in
+code. Design doc §8.2/§8.3, `docs/rigging_check_list.md` item 1, and
+CLAUDE.md's `director/motion.py` note are all updated to reflect this.
+
+**Not fully closed.** The physics group needs something to lag *behind*.
+With face tracking off (§7.3), only a plugin-injected parameter can drive
+head motion, and injection can only write custom "tracking" params (phase
+0's error-453 finding) that must be hand-bound in the VTS UI to a Live2D
+output — the same step already done for `happy` in phase 0, not yet
+confirmed done for a head parameter. If it isn't, `xp4`/`yp5` will sit
+still during an autonomous session despite moving fine under a manual
+slider or webcam test. `docs/rigging_check_list.md` item 1 tracks this as
+the remaining open half, targeted for verification before phase 2 (not a
+hard stop for phase 1).
+
+§8.3's "faster/slower spring response by mood" is no longer achievable —
+stiffness/damping are now baked into the model's `.physics3.json` at rig
+time, not exposed by the VTS API. Amplitude and posture-offset modulation
+are unaffected. Doc updated to say so rather than leave it stale.
 
 ## Standing decisions made this session
 
@@ -120,3 +144,8 @@ The rig's confirmed parameter groups, for reference:
    before any audio exists — director-level, not bus-level.
 2. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
    priority, quick, not expected to change any conclusion).
+3. Before phase 2: verify the ball physics drive chain
+   (`docs/rigging_check_list.md` item 1) — bind a custom tracking param to
+   a head Live2D output if not already done, inject into it, and confirm
+   `xp4`/`yp5` visibly lag in response with face tracking off. If that bind
+   doesn't exist, the ball won't move during an autonomous session.

@@ -90,9 +90,13 @@ silently. A bad tag must never crash a turn or leak into TTS text.
 **director/director.py** — schedules emotes against the **audio playback clock**, not token
 arrival. Tokens arrive well before the audio they correspond to.
 
-**director/motion.py** — the ball runs through a damped spring so it lags the head
-(`stiffness ≈ 120`, `damping ≈ 14`, 60Hz). This is the highest-value single feature in the
-project. Always on, during speech and idle and emotes alike.
+**director/motion.py** — the ball's lag behind the head is now native to the rig: the
+rigger added a dedicated physics group (`xp4`/`yp5`, plus `yp6` for bubble scale) that
+bakes in the damped-spring behavior originally spec'd for this module, confirmed live in
+VTS. No code-side spring needed. Still open: whether that physics group's input can
+actually be driven by the plugin with face tracking off — see `docs/rigging_check_list.md`
+item 1. This is still the highest-value single feature in the project; it just moved out
+of code and into the rig.
 
 **director/aliveness.py** — runs independently of the LLM at three rates: 60Hz micro, ~1Hz
 meso, ~1/min macro. Idle drift uses smoothed noise, never sine waves — a detectable loop is

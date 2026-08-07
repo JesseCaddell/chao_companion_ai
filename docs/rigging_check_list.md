@@ -6,25 +6,37 @@ against the phase that actually needs them (design doc §17).
 
 ## Open
 
-### 1. Ball position parameter
+### 1. Ball position parameter — drive-chain verification
 
 **Needed for:** §8.2 ball spring (damped lag behind head motion), Phase 2.
 
-**Finding:** The current rig has no parameter that moves the ball/bubble's
-on-screen position. Confirmed via VTS's Live2D parameter test panel — every
-position-shaped candidate (`xp`, `xp2`, `xp3`, `yp3`, `yp4`) produces no visible
-motion, and a live head-drag/webcam test showed no lag on the ball or its bubble
-on its own. The existing `bubble` value drift is idle flame-flicker on the aura
-sprite, not positional physics.
+**Update:** The rigger added a dedicated physics group for the ball:
+`xp4` (X), `yp5` (Y), and `yp6` (bubble scale, −1..1 shrink/grow — not
+positional, part of the same new group). Lag confirmed live in VTS by the
+artist — the physics group now bakes in §8.2's damped-spring behavior
+natively, so **no code-side spring is needed for ball position**. This
+replaces the original finding below, which no longer applies now that the
+parameters exist.
 
-**Ask:** A parameter (or two, X/Y) that translates the ball+bubble group, driven
-externally, so it can be sprung to lag the head per §8.2. Doesn't need a large
-range — the spring overshoots slightly and settles in ~1/3 second, so a small
-travel range is enough.
+**What's still open:** the physics group needs *something* driving its
+input to lag behind. With face tracking off (§7.3), the only thing that can
+drive head motion is a plugin-injected parameter — and `InjectParameterDataRequest`
+can only write custom "tracking" parameters (the phase 0 error-453 finding),
+which then need a one-time manual bind in the VTS UI to a head Live2D
+output. That bind hasn't been confirmed to exist yet. If nothing is bound
+to head motion, `xp4`/`yp5` will sit still during an autonomous session even
+though they move correctly under a manual slider test or webcam drag — the
+same kind of thing phase 0 originally found for `happy`.
 
-**Status:** Not a hard stop. Deferred; should land before Phase 2 starts if we
-still want this feature. Confirmed *not* buildable in code alone regardless.
+**Ask (verification, not the artist):** before phase 2 relies on this, bind
+a custom tracking param to a head output (`ParamAngleX`/`Y`) if not already
+done, inject into it, and confirm `xp4`/`yp5` visibly lag in response — the
+same pattern already proven for `happy` in phase 0.
+
+**Status:** Not a hard stop. The rigging half is done; a plugin-side
+verification pass remains before Phase 2 starts.
 
 ## Resolved
 
-(none yet)
+(none yet — item 1's rigging half is done, but it stays open until the
+drive-chain verification above is confirmed.)
