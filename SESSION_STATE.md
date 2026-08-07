@@ -4,6 +4,29 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
+## Stopping point (end of session 4, 2026-08-07)
+
+Phase 1's core pipeline is fully live and VTS-connected: typed input →
+`Bus` → `TurnOrchestrator` → real Anthropic call → `Director` (tags →
+emotes) → `VTSEmoteSubscriber` → real expressions firing on the model,
+all verified end-to-end against the running app, not just tests. Two
+real bugs were found and fixed this session by actually running it live
+(circuit breaker's timeout was too tight for a cold connection; emote
+hotkey names were placeholders that didn't match VTS at all) — both are
+reminders that "tests pass" and "wiring is correct" aren't the same as
+"it works," for this project in particular.
+
+Nothing is broken or mid-edit. Everything built this session is
+committed. The only loose end is `neutral`, which is deliberately
+shelved (see the follow-up note under "config/emotes.yaml confirmed
+against live VTS" below) — not a blocker for anything else.
+
+**Pick up here tomorrow:** next actions list at the bottom, roughly in
+priority order. The dashboard skeleton is probably the most natural next
+step (turns are currently only visible via console prints), but phase 2
+kickoff (TTS model selection) is equally reasonable if that's the
+priority instead.
+
 ## Where we are
 
 **Phase 0 is complete. Phase 1 is started** (brain + director + dashboard —
@@ -411,14 +434,21 @@ should go through the expression file, not `HotkeyTriggerRequest`.
 **Follow-up (session 4):** user authored a `neutral` hotkey in VTS, but
 it came in as VTS's built-in **`RemoveAllExpressions`** type, not
 `ToggleExpression` — there's still no `neutral.exp3.json` file, and
-`RemoveAllExpressions` has no file to activate at all. It's a coherent
-design (fire it to clear whatever mood expression is active, back to
-baseline) but it can only be triggered via `HotkeyTriggerRequest` with
-its hotkey ID, not `ExpressionActivationRequest` — a different code path
-than every other pool. Still nothing maps to it (`neutral` isn't in
-`_TAG_TO_POOL`), so `config/emotes.yaml`'s `neutral: { hotkeys: [] }`
-stays correct for now. Whoever wires this up later needs to special-case
-it, not treat it like the other seven pools.
+`RemoveAllExpressions` has no file to activate at all. This wasn't
+deliberate: the user tried to build a real neutral *expression* (a file
+with explicit parameter values to reset everything to baseline) but
+couldn't tell what values to set without knowing the model's full
+parameter list/rest state — VTS doesn't offer an easy "capture current
+pose as an expression" shortcut for this. `RemoveAllExpressions` is what
+VTS gave by default instead, and works conceptually (clears whatever's
+active) but needs a different code path (`HotkeyTriggerRequest` by
+hotkey ID, not `ExpressionActivationRequest` by file) than every other
+pool. Deliberately shelved — this needs either the exact rest-state
+parameter values (a modeling task, not a VTS-UI task) or a code special
+case for `RemoveAllExpressions`, and neither is a priority right now
+since nothing maps to `neutral` yet (`_TAG_TO_POOL` doesn't reference
+it). `config/emotes.yaml`'s `neutral: { hotkeys: [] }` stays correct as
+a placeholder.
 
 ## outputs/vts.py — VTS emote subscriber (session 4)
 
@@ -481,11 +511,12 @@ it isn't lost before phase 2 starts:
 1. The dashboard skeleton (FastAPI + websocket subscriber) so turns are
    visible without reading console output — `_print_events` in `__main__.py`
    is a throwaway stand-in, not meant to survive.
-2. User: author a default-state `neutral` expression in VTS as an actual
-   `ToggleExpression`/expression file (the current `neutral` hotkey is a
-   `RemoveAllExpressions` action, which needs different code to fire —
-   see the follow-up note above) — or decide `RemoveAllExpressions` is
-   actually what's wanted and the emote subscriber gets a special case.
+2. `neutral` is shelved, not urgent — nothing fires it yet. When it
+   resurfaces: either figure out the model's rest-state parameter values
+   well enough to author a real `neutral.exp3.json` (may need the
+   rigger's help, per the follow-up note above), or accept
+   `RemoveAllExpressions` as the permanent design and give
+   `VTSEmoteSubscriber` a special case for `HotkeyTriggerRequest`.
 3. Anticipation nudge (§10.5) needs something subscribing to
    `brain.request` to pop the question-mark ball before audio exists —
    that's aliveness.py's job, not yet built.
