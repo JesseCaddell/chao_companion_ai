@@ -3,14 +3,15 @@ runs it against typed stdin input. `uv run python -m chao`.
 
 This is the first live-runnable slice of phase 1 — enough to prove the
 pipeline built this session actually works end-to-end, not a finished
-app. No dashboard, no VTS output, no Twitch/voice input yet; typed lines
-become `input.manual` events and the console prints the response as it
-streams.
+app. No dashboard, no Twitch/voice input yet; typed lines become
+`input.manual` events, the console prints the response as it streams, and
+VTS shows the matching expression if it's running (degrades gracefully to
+console-only if it isn't).
 
 `build_pipeline` holds all the wiring and takes its dependencies as
 arguments, so it's testable with fakes; `main()` is where the real I/O
-(env vars, config files, stdin) lives, and only runs under
-`if __name__ == "__main__"`.
+(env vars, config files, stdin, VTS connection) lives, and only runs
+under `if __name__ == "__main__"`.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from chao.brain.turn import TurnOrchestrator
 from chao.bus import Bus
 from chao.director.director import Director, EmoteConfig, load_emote_config
 from chao.events import Event, Kind
+from chao.outputs.vts import VTSClient, VTSEmoteSubscriber
 
 CONFIG_DIR = Path("config")
 IDENTITY_PATH = CONFIG_DIR / "identity.md"
@@ -73,6 +75,30 @@ async def _print_events(sub: asyncio.Queue[Event]) -> None:
             print(f"  !! error: {event.payload.get('message')}")
 
 
+async def _run_vts_subscriber(bus: Bus, emote_config: EmoteConfig) -> None:
+    """Connects to VTS and turns `director.emote` events into real
+    ExpressionActivationRequest calls. Degrades gracefully, not fatally, if
+    VTS isn't running or rejects auth — the chat loop is still useful
+    without it, it just won't show anything on the model.
+    """
+    client = VTSClient()
+    try:
+        await client.connect()
+        await client.authenticate()
+    except (OSError, RuntimeError) as e:
+        print(f"  (VTS unavailable, emotes won't display: {e})")
+        return
+
+    subscriber = VTSEmoteSubscriber(client=client, emote_config=emote_config, publish=bus.publish)
+    sub = bus.subscribe()
+    try:
+        while True:
+            event = await sub.get()
+            await subscriber.handle(event)
+    finally:
+        await client.close()
+
+
 async def _read_stdin_into_bus(bus: Bus) -> None:
     loop = asyncio.get_running_loop()
     while True:
@@ -108,6 +134,7 @@ async def main() -> None:
     )
 
     console_task = asyncio.create_task(_print_events(bus.subscribe()))
+    vts_task = asyncio.create_task(_run_vts_subscriber(bus, emote_config))
     run_task = asyncio.create_task(bus.run(orchestrator))
 
     print("chao is listening. Type a message and press enter. 'quit' or Ctrl+D to exit.")
@@ -121,7 +148,8 @@ async def main() -> None:
         bus.kill()
         run_task.cancel()
         console_task.cancel()
-        await asyncio.gather(run_task, console_task, return_exceptions=True)
+        vts_task.cancel()
+        await asyncio.gather(run_task, console_task, vts_task, return_exceptions=True)
 
 
 if __name__ == "__main__":
