@@ -4,28 +4,38 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
-## Stopping point (end of session 4, 2026-08-07)
+## Stopping point (end of session 5, 2026-08-07)
 
-Phase 1's core pipeline is fully live and VTS-connected: typed input →
-`Bus` → `TurnOrchestrator` → real Anthropic call → `Director` (tags →
-emotes) → `VTSEmoteSubscriber` → real expressions firing on the model,
-all verified end-to-end against the running app, not just tests. Two
-real bugs were found and fixed this session by actually running it live
-(circuit breaker's timeout was too tight for a cold connection; emote
-hotkey names were placeholders that didn't match VTS at all) — both are
-reminders that "tests pass" and "wiring is correct" aren't the same as
-"it works," for this project in particular.
+The dashboard (design doc §11) exists and is verified working end-to-end,
+scoped deliberately to just the event feed panel (§11.2 item 3) — the
+other eight panels render data nothing in the backend produces yet
+(retrieval, mood.py, parameter injection), so building UI for them now
+would be UI over nothing. `__main__.py`'s `_print_events` console stand-in
+is gone, replaced by an in-process FastAPI/uvicorn server plus a Vite+React
+frontend (`src/chao/dashboard/web/`), exactly per §11.4's stack. A real
+turn (typed input → Anthropic → tags → emotes) was pushed through the
+actual websocket and its full event sequence confirmed on the wire via a
+scripted client — see "Dashboard skeleton" below for what was and wasn't
+visually verified (no Chrome extension available this session, so the
+React frontend itself was never opened in an actual browser — flagged
+explicitly, not glossed over).
 
-Nothing is broken or mid-edit. Everything built this session is
-committed. The only loose end is `neutral`, which is deliberately
-shelved (see the follow-up note under "config/emotes.yaml confirmed
-against live VTS" below) — not a blocker for anything else.
+Also this session: the C→D directory move (done between sessions, outside
+a coding session) had silently broken the venv's editable install, which
+would have made every test fail with a confusing `ModuleNotFoundError`
+the moment anyone tried to run them — caught and fixed. Ollama got
+installed and `qwen3:8b` pulled and wired in as the local fallback,
+confirmed CPU-only and working, though slow (as expected).
 
-**Pick up here tomorrow:** next actions list at the bottom, roughly in
-priority order. The dashboard skeleton is probably the most natural next
-step (turns are currently only visible via console prints), but phase 2
-kickoff (TTS model selection) is equally reasonable if that's the
-priority instead.
+Nothing is broken or mid-edit; 93 tests passing, ruff clean. Everything
+built this session is on disk but **not yet committed** — the user hasn't
+asked for a commit yet this session. The only loose end from before is
+`neutral`, still deliberately shelved.
+
+**Pick up here next session:** next actions list at the bottom, roughly in
+priority order. `aliveness.py` is probably the most natural next step now
+that the dashboard exists to watch it work, but phase 2 kickoff (TTS model
+selection) is equally reasonable if that's the priority instead.
 
 ## Where we are
 
@@ -506,25 +516,191 @@ it isn't lost before phase 2 starts:
   session) once TTS exists, rather than a new tool — noted as open
   question 6, to actually decide at phase 2, not before.
 
+## Project moved from C: to D:, Ollama installed, qwen3:8b pulled (session 5)
+
+The project directory moved from C: to D: (now `D:\PycharmProjects\chao_companion_ai`,
+no space — it had previously lived at a path with a space in it, `D:\Pycharm
+Projects\...`, at least once along the way). **The move silently broke the venv's
+editable install**: `.venv/Lib/site-packages/_editable_impl_chao.pth` still pointed at
+the old `D:\Pycharm Projects\chao_companion_ai\src` path, so `import chao` failed and
+all 11 test modules errored at collection with `ModuleNotFoundError: No module named
+'chao'`. Fixed with `uv sync` (regenerates the `.pth` to the current path) — 90 tests
+passing again, confirmed clean. **If tests ever fail to collect with that error again
+after moving/renaming the project directory, this is why — run `uv sync` first before
+assuming real code is broken.**
+
+Ollama itself installed and confirmed working:
+- System env vars `OLLAMA_MODELS=D:\.ollama\models` and `OLLAMA_NUM_GPU=0` were set by
+  the user (Windows System Properties, machine scope) so models live on D: and inference
+  stays CPU-only per invariant 1. Verified via registry
+  (`[Environment]::GetEnvironmentVariable(..., "Machine")`) rather than trusting the
+  already-open shell's env, since a shell started before the vars were created won't see
+  them. The Ollama app/server processes were already running from before the vars were
+  set, so they were restarted (`Stop-Process` + relaunch `ollama app.exe`) to pick the
+  new env up.
+- `ollama pull qwen3:8b` (5.2 GB) succeeded and landed correctly on
+  `D:\.ollama\models\blobs` (confirmed via `ollama list` and directly inspecting the
+  folder; the default `C:\Users\jesse\.ollama\models` stayed empty).
+- **Live smoke test via `ollama run qwen3:8b`, CPU-only:** first call took ~2 minutes
+  total — 57s cold load (disk → RAM, one-time per keep-alive window) + ~24s prompt eval
+  + ~41s generation eval, at **0.89 tokens/s prompt eval / 2.89 tokens/s generation**.
+  Slow, but this is the expected cost of invariant 1 (zero VRAM, CPU-only) on an 8B
+  model, not a bug. Most of the generated tokens were Qwen3's default "thinking" mode
+  reasoning through a one-sentence request before the real answer — `ollama run`'s CLI
+  visibly separates `Thinking...` / `...done thinking.` from the actual reply.
+  **Confirmed directly against the raw API this session** (`curl .../api/chat` with
+  `stream: true`): each streamed chunk has separate `message.thinking` and
+  `message.content` keys — `content` stays `""` while reasoning is in progress and only
+  populates for the real reply. `brain/local.py`'s `OllamaBackend` already only reads
+  `chunk["message"]["content"]`, so thinking tokens are correctly excluded from what
+  reaches `Director`/TTS with no code change needed — verified, not just inferred from
+  the CLI's rendering. Still worth deciding whether to pass `"think": false` in
+  `OllamaBackend`'s payload to cut latency — chao's responses are short/tag-driven,
+  unlikely to need multi-step reasoning, and thinking mode roughly doubles wall-clock
+  time on top of an already-slow CPU path. Not changed this session — flagging as a
+  decision, not making it unilaterally, since it trades latency for potential answer
+  quality.
+- `__main__.py`'s `DEFAULT_OLLAMA_MODEL` updated from the untested placeholder
+  (`llama3.1:8b-instruct-q4_K_M`) to `qwen3:8b`; `.env.example`'s `CHAO_OLLAMA_MODEL`
+  comment updated to match. The circuit breaker's local fallback path is now pointed at
+  a real, working model, though its first-call latency (~2 min cold) is far past the
+  5.0s `first_token_timeout_s` used for the *cloud* primary — that timeout only gates
+  cloud's first token, not local's, so this doesn't break anything, but a fallback to
+  local after a cloud failure will feel very slow to a live user. Not addressed this
+  session (`OllamaBackend`'s `keep_alive` isn't configured — repeat calls within
+  Ollama's default keep-alive window should skip the 57s reload).
+
+Nothing else changed. Still not run: an actual end-to-end pipeline turn that falls
+through to the local backend (item below).
+
+## Dashboard skeleton (session 5, cont'd)
+
+Built per design doc §11, scoped to the event feed panel only (§11.2 item
+3) — see the top-of-file rationale for why the other eight panels wait.
+
+**`src/chao/bus.py`** got one small addition first, needed before a
+websocket-backed subscriber could exist safely: `Bus.subscribe()` had no
+matching `unsubscribe()`, so every dashboard connection (a browser refresh
+during frontend dev, a reconnect) would permanently leak a queue into
+`_subscribers` — never removed, still paid for on every future
+`_fan_out()`. Added `unsubscribe()` (a `list.remove`, one call site, no new
+abstraction) and made `_fan_out` iterate `list(self._subscribers)` so a
+subscriber unsubscribing itself mid-fan-out can't mutate the list being
+iterated. Flagged to the user first since bus.py touches CLAUDE.md's
+"escalate before changing the bus contract" rule — advisor input was that
+this specific change is additive/mechanical (symmetric teardown for an
+existing lifecycle method), not the kind of arbitration-semantics change
+the rule is really guarding against, so it went ahead without a separate
+Opus pass. New test: `test_unsubscribe_stops_further_fan_out`. 91 tests
+passing at that point.
+
+**`src/chao/dashboard/server.py`** — `create_app(bus) -> FastAPI`,
+dependency-injected like `build_pipeline`. One route, `/ws/events`:
+accepts the websocket, calls `bus.subscribe()`, relays every `Event` as
+JSON (`dataclasses.asdict`) until disconnect, then `bus.unsubscribe()`s in
+a `finally`. Checked what actually goes into `Event.payload` across
+`turn.py`/`director.py`/`vts.py`/`bus.py` before trusting `send_json` on
+it — all primitives (str/int/float/None/list[str]/dict[str,int]) today, so
+no custom encoder needed; worth re-checking if a future payload field ever
+holds something richer. CORS wide open (`allow_origins=["*"]`) since the
+Vite dev server runs on a different port and this never leaves localhost.
+New tests in `tests/test_dashboard_server.py`, using
+`fastapi.testclient.TestClient`'s websocket support: one confirms a
+published event round-trips over the wire, one confirms disconnect
+actually calls `unsubscribe` (reaches into `bus._subscribers` directly —
+acceptable for a whitebox test of exactly the leak this session set out to
+fix). 93 tests passing, ruff clean.
+
+**`src/chao/dashboard/web/`** — scaffolded fresh via `npm create
+vite@latest . -- --template react-ts` (the directory only had a
+`.gitkeep` before), per design doc §11.4's stack decision. Demo
+boilerplate (counter, react/vite logos, marketing-page CSS) stripped
+entirely. `App.tsx` is one component: opens a `WebSocket` to
+`ws://127.0.0.1:8765/ws/events`, shows a connected/disconnected indicator,
+accumulates `brain.token` chunks per `turn_id` into a live streaming
+bubble (folded into a normal feed entry on that turn's `brain.complete`),
+and renders everything else as a reverse-chronological list capped to 200
+entries with kind-specific one-line summaries (latency for
+`brain.complete`, pool→hotkey for `director.emote`, etc.). No router, no
+state library, no env-var configuration for the WS URL — none of that is
+earned yet for a one-screen skeleton. `npm run build` (tsc -b + vite
+build) passes clean, confirming the TypeScript is sound even without a
+browser to load it in.
+
+**Wired into `__main__.py`:** `_print_events` (which printed everything —
+tokens, latency, emotes, drops, errors) is gone. Replaced by two things:
+`_run_dashboard_server`, which runs `uvicorn.Server(...).serve()` as an
+`asyncio.Task` in the *same* process (not `uvicorn.run`, which would call
+its own `asyncio.run` and fight the loop `main()` already owns — this
+matters because the dashboard's websocket handler calls `bus.subscribe()`,
+an in-process `asyncio.Queue`, not a network call); and `_print_errors`, a
+~10-line stderr backstop that only surfaces `Kind.ERROR` — kept
+deliberately, per advisor review, so a VTS auth failure or turn crash
+isn't silently invisible on a run where nobody has the dashboard open
+(first run of the day, uvicorn failed to bind, etc.). Startup now prints
+the dashboard's websocket URL and the `npm run dev` command to launch the
+frontend. Also fixed two stale bits of `__main__.py` while in there: the
+`ANTHROPIC_API_KEY` error message still said Ollama "isn't installed
+yet" (it is now), and `DEFAULT_OLLAMA_MODEL` still pointed at the
+never-installed placeholder from session 3 (now `qwen3:8b`, matching the
+Ollama work earlier this session).
+
+**Verification, and its limits.** Ran the real app (`uv run python -m
+chao`, via a named pipe so stdin could stay open across a background
+task) and the real Vite dev server side by side, then connected a small
+scripted Python client (`websockets.connect(...)`) directly to
+`/ws/events` instead of a browser — the Chrome extension used for browser
+automation wasn't connected in this environment (`tabs_context_mcp`
+failed: "Browser extension is not connected"). Typed a real message into
+the running app's stdin and confirmed the *exact* event sequence arrived
+over the actual websocket: `input.manual` → `decision.selected` →
+`brain.request` → `brain.token` (×2, real Anthropic streaming) →
+`director.tag`/`director.emote` (×2, `happy` then `curious`, tags the
+model chose unprompted) → `brain.complete` with real latency. This proves
+the backend, the bus change, and the websocket wire format are all
+correct — it's the same event stream `App.tsx` is built to parse. **What
+it does not prove:** that the React component actually renders this
+correctly in a real browser (CSS layout, the streaming-bubble/entry-list
+split, the connected/disconnected indicator). That's a genuine gap, not
+glossed over — next session, if the Chrome extension is available, open
+`http://localhost:5173` while the app is running and visually confirm the
+event feed renders as intended before trusting it further.
+
 ## Next actions
 
-1. The dashboard skeleton (FastAPI + websocket subscriber) so turns are
-   visible without reading console output — `_print_events` in `__main__.py`
-   is a throwaway stand-in, not meant to survive.
-2. `neutral` is shelved, not urgent — nothing fires it yet. When it
+1. **Visually verify the dashboard frontend in a real browser** — see the
+   "Verification, and its limits" note directly above. The backend/wire
+   protocol is proven; the React rendering isn't, yet. Cheap to do first
+   thing next session, before building anything further on top of it.
+2. Aliveness — `aliveness.py` is still an empty stub, and it's arguably
+   the single highest-value remaining piece of phase 1. Two things live
+   here: the meso/macro idle-drift layers (CLAUDE.md's `director/aliveness.py`
+   note — 60Hz micro / ~1Hz meso / ~1/min macro, smoothed noise not sine
+   waves), and the §10.5 anticipation nudge specifically — something
+   subscribing to `brain.request` to pop the question-mark ball before
+   audio exists, now that the dashboard exists to actually watch it fire.
+3. `neutral` is shelved, not urgent — nothing fires it yet. When it
    resurfaces: either figure out the model's rest-state parameter values
    well enough to author a real `neutral.exp3.json` (may need the
    rigger's help, per the follow-up note above), or accept
    `RemoveAllExpressions` as the permanent design and give
    `VTSEmoteSubscriber` a special case for `HotkeyTriggerRequest`.
-3. Anticipation nudge (§10.5) needs something subscribing to
-   `brain.request` to pop the question-mark ball before audio exists —
-   that's aliveness.py's job, not yet built.
-4. If/when Ollama gets installed, pull a real model and set
-   `CHAO_OLLAMA_MODEL` (or update `DEFAULT_OLLAMA_MODEL` in `__main__.py`) —
-   the fallback path is currently untested against a real server.
+4. ~~If/when Ollama gets installed, pull a real model~~ — done this session
+   (`qwen3:8b`, CPU-only, confirmed working, thinking-token exclusion
+   verified against the raw API). Follow-ups still outstanding: (a) whether
+   to pass `"think": false` to cut latency — **user decision: defer until
+   chao is rigged and live, so the effect on real interactions can be felt
+   rather than guessed at**, not a blocker for anything else; (b) run one
+   real end-to-end turn through the local fallback path (not just a
+   standalone `ollama run`) to see the whole chain behave, ideally with
+   `keep_alive` considered so it's not paying the 57s cold-load tax every
+   time.
 5. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
    priority, quick, not expected to change any conclusion).
 6. Phase 2 kickoff, when ready: pick a TTS model (Piper is the current
    placeholder, §18), and scope the subtitle overlay + personality/voice
    test segment noted above — none of the three are started yet.
+7. Once the dashboard's event feed panel has been used for a bit and its
+   rough edges are known, consider the next panel per §11.2's priority
+   order (retrieval trace and mood plot both still need their underlying
+   features built first, so realistically this is a phase-6+ concern).

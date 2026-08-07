@@ -87,6 +87,14 @@ class Bus:
         self._subscribers.append(q)
         return q
 
+    def unsubscribe(self, q: asyncio.Queue[Event]) -> None:
+        """Pairs with `subscribe()` — call from a `finally` when a subscriber
+        goes away (e.g. a dashboard websocket disconnecting). Without this,
+        a long-lived process accumulates one dead queue per connection
+        forever, each still paying the cost of every future `_fan_out`.
+        """
+        self._subscribers.remove(q)
+
     def publish(self, event: Event) -> None:
         """Entry point for every producer (inputs/, director/, outputs/, vts.py)."""
         if event.kind not in TURN_TRIGGERING_KINDS:
@@ -111,7 +119,10 @@ class Bus:
         self._queue.put_nowait(event)
 
     def _fan_out(self, event: Event) -> None:
-        for q in self._subscribers:
+        # Copy the list: a subscriber unsubscribing mid-iteration (a
+        # websocket disconnect handled inline) must not mutate what we're
+        # iterating over.
+        for q in list(self._subscribers):
             q.put_nowait(event)
 
     def priority_of(self, event: Event) -> Priority:

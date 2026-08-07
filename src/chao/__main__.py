@@ -3,15 +3,15 @@ runs it against typed stdin input. `uv run python -m chao`.
 
 This is the first live-runnable slice of phase 1 — enough to prove the
 pipeline built this session actually works end-to-end, not a finished
-app. No dashboard, no Twitch/voice input yet; typed lines become
-`input.manual` events, the console prints the response as it streams, and
-VTS shows the matching expression if it's running (degrades gracefully to
-console-only if it isn't).
+app. No Twitch/voice input yet; typed lines become `input.manual` events,
+the dashboard (§11 — event feed panel only so far) renders the response as
+it streams, and VTS shows the matching expression if it's running
+(degrades gracefully if either isn't up).
 
 `build_pipeline` holds all the wiring and takes its dependencies as
 arguments, so it's testable with fakes; `main()` is where the real I/O
-(env vars, config files, stdin, VTS connection) lives, and only runs
-under `if __name__ == "__main__"`.
+(env vars, config files, stdin, VTS connection, dashboard server) lives,
+and only runs under `if __name__ == "__main__"`.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import asyncio
 import os
 from pathlib import Path
 
+import uvicorn
 from dotenv import load_dotenv
 
 from chao.brain.backend import CircuitBreakerBackend, LLMBackend
@@ -27,19 +28,23 @@ from chao.brain.cloud import AnthropicBackend
 from chao.brain.local import OllamaBackend
 from chao.brain.turn import TurnOrchestrator
 from chao.bus import Bus
+from chao.dashboard.server import create_app
 from chao.director.director import Director, EmoteConfig, load_emote_config
 from chao.events import Event, Kind
 from chao.outputs.vts import VTSClient, VTSEmoteSubscriber
+
+DASHBOARD_HOST = "127.0.0.1"
+DASHBOARD_PORT = 8765
 
 CONFIG_DIR = Path("config")
 IDENTITY_PATH = CONFIG_DIR / "identity.md"
 EMOTES_PATH = CONFIG_DIR / "emotes.yaml"
 
-# No Ollama model is confirmed installed yet (see SESSION_STATE.md) — this
-# is a placeholder so OllamaBackend can be constructed at all. Override
-# with the env var once a real model is pulled; until then the circuit
-# breaker's fallback path will itself fail if cloud ever needs it.
-DEFAULT_OLLAMA_MODEL = "llama3.1:8b-instruct-q4_K_M"
+# Confirmed installed and working (see SESSION_STATE.md) — pulled via
+# `ollama pull qwen3:8b`, CPU-only (OLLAMA_NUM_GPU=0), models stored on
+# D: via the OLLAMA_MODELS system env var. Override with CHAO_OLLAMA_MODEL
+# if needed.
+DEFAULT_OLLAMA_MODEL = "qwen3:8b"
 
 
 def build_pipeline(
@@ -56,23 +61,30 @@ def build_pipeline(
     return bus, orchestrator
 
 
-async def _print_events(sub: asyncio.Queue[Event]) -> None:
-    """Stand-in for the dashboard/JSONL log (neither built yet) — just
-    enough console visibility to prove a turn actually happened. Tokens
-    print inline to simulate streaming; everything else gets a line.
+async def _print_errors(sub: asyncio.Queue[Event]) -> None:
+    """The dashboard (§11) is the real event viewer now — this is just a
+    stderr backstop so a VTS auth failure or turn crash isn't silent when
+    nobody has the dashboard open (e.g. the very first run, or if uvicorn
+    failed to bind). Errors only; token/latency/emote detail lives in the
+    dashboard's event feed.
     """
     while True:
         event = await sub.get()
-        if event.kind == Kind.BRAIN_TOKEN:
-            print(event.payload["text"], end="", flush=True)
-        elif event.kind == Kind.BRAIN_COMPLETE:
-            print(f"\n  (latency: {event.payload['latency_ms']:.0f}ms)")
-        elif event.kind == Kind.DIRECTOR_EMOTE:
-            print(f"  [emote: {event.payload['pool']} -> {event.payload['hotkey_id']}]")
-        elif event.kind == Kind.DECISION_DROPPED:
-            print(f"  (dropped: {event.payload.get('reason')})")
-        elif event.kind == Kind.ERROR:
+        if event.kind == Kind.ERROR:
             print(f"  !! error: {event.payload.get('message')}")
+
+
+async def _run_dashboard_server(bus: Bus) -> None:
+    """Runs uvicorn in-process (not `uvicorn.run`, which calls `asyncio.run`
+    and would fight the loop `main()` already owns) since the dashboard's
+    websocket subscribes to the same in-memory `Bus` the rest of the app
+    uses — it isn't a separate process or network service.
+    """
+    config = uvicorn.Config(
+        create_app(bus), host=DASHBOARD_HOST, port=DASHBOARD_PORT, log_level="warning"
+    )
+    server = uvicorn.Server(config)
+    await server.serve()
 
 
 async def _run_vts_subscriber(bus: Bus, emote_config: EmoteConfig) -> None:
@@ -117,10 +129,7 @@ async def main() -> None:
     load_dotenv()  # loads .env into os.environ if present; no-op otherwise
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise SystemExit(
-            "ANTHROPIC_API_KEY is not set — the cloud backend can't run. "
-            "(The Ollama fallback is a placeholder and isn't installed yet either.)"
-        )
+        raise SystemExit("ANTHROPIC_API_KEY is not set — the cloud backend can't run.")
 
     identity = IDENTITY_PATH.read_text() if IDENTITY_PATH.exists() else ""
     emote_config = load_emote_config(EMOTES_PATH)
@@ -133,11 +142,16 @@ async def main() -> None:
         identity=identity, emote_config=emote_config, backend=backend
     )
 
-    console_task = asyncio.create_task(_print_events(bus.subscribe()))
+    error_task = asyncio.create_task(_print_errors(bus.subscribe()))
+    dashboard_task = asyncio.create_task(_run_dashboard_server(bus))
     vts_task = asyncio.create_task(_run_vts_subscriber(bus, emote_config))
     run_task = asyncio.create_task(bus.run(orchestrator))
 
-    print("chao is listening. Type a message and press enter. 'quit' or Ctrl+D to exit.")
+    print(
+        "chao is listening. Type a message and press enter. 'quit' or Ctrl+D to exit.\n"
+        f"Dashboard: ws://{DASHBOARD_HOST}:{DASHBOARD_PORT}/ws/events "
+        "(run the frontend with `cd src/chao/dashboard/web && npm run dev`)"
+    )
     try:
         await _read_stdin_into_bus(bus)
     finally:
@@ -147,9 +161,12 @@ async def main() -> None:
         # warning on quit.
         bus.kill()
         run_task.cancel()
-        console_task.cancel()
+        error_task.cancel()
+        dashboard_task.cancel()
         vts_task.cancel()
-        await asyncio.gather(run_task, console_task, vts_task, return_exceptions=True)
+        await asyncio.gather(
+            run_task, error_task, dashboard_task, vts_task, return_exceptions=True
+        )
 
 
 if __name__ == "__main__":

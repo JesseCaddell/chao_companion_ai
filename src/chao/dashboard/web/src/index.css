@@ -1,0 +1,131 @@
+:root {
+  --text: #3a3a3a;
+  --text-dim: #8a8a8a;
+  --bg: #ffffff;
+  --bg-alt: #f4f4f5;
+  --border: #e0e0e2;
+  --accent: #7c3aed;
+  --error: #d1293d;
+  --mono: ui-monospace, Consolas, monospace;
+
+  color-scheme: light dark;
+  color: var(--text);
+  background: var(--bg);
+  font: 14px/1.5 var(--mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: #d4d4d8;
+    --text-dim: #71717a;
+    --bg: #18181b;
+    --bg-alt: #232326;
+    --border: #2e2e33;
+    --accent: #a78bfa;
+    --error: #f87171;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  padding: 0 16px 16px;
+}
+
+.dashboard-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.dashboard-header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.status {
+  font-size: 12px;
+}
+
+.status-up {
+  color: var(--accent);
+}
+
+.status-down {
+  color: var(--error);
+}
+
+.streaming {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  white-space: pre-wrap;
+}
+
+.cursor {
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  margin-left: 2px;
+  background: var(--accent);
+  vertical-align: text-bottom;
+  animation: blink 1s step-start infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.feed {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.entry {
+  display: flex;
+  gap: 10px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.entry .ts {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.entry .kind {
+  color: var(--text-dim);
+  flex-shrink: 0;
+  min-width: 140px;
+}
+
+.entry-error {
+  color: var(--error);
+}

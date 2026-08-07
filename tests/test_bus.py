@@ -245,3 +245,12 @@ async def test_kill_switch_drops_new_turns(bus: Bus):
     await stop(task)
     events = await drain(sub)
     assert any(e.kind == Kind.DECISION_DROPPED and e.payload["reason"] == "killed" for e in events)
+
+
+def test_unsubscribe_stops_further_fan_out(bus: Bus):
+    sub = bus.subscribe()
+    bus.unsubscribe(sub)
+
+    bus.publish(Event(kind=Kind.INPUT_AMBIENT, payload={"source": "timer"}))
+
+    assert sub.empty()
