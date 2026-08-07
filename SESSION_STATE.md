@@ -118,6 +118,63 @@ stiffness/damping are now baked into the model's `.physics3.json` at rig
 time, not exposed by the VTS API. Amplitude and posture-offset modulation
 are unaffected. Doc updated to say so rather than leave it stale.
 
+## brain/ — LLM backend protocol and prompt assembly (session 3)
+
+Built against design doc §4.3/§5, in two commits:
+
+**`brain/backend.py`** — the `LLMBackend` Protocol exactly as §5 specifies
+(`stream(system, messages, cancel) -> AsyncIterator[str]`), plus
+`CircuitBreakerBackend` (§5.3): races the primary's first token against a
+timeout (default 2s); on timeout or any exception *before* the first
+token, falls back to a second backend for the whole turn. Once the primary
+has yielded anything, no fallback is possible — later errors just
+propagate, since switching backends after text is already out would
+duplicate it.
+
+**`brain/prompt.py`** — `assemble_prompt` is a pure function (no file/DB
+I/O — that's the caller's job) returning a `Prompt` with `stable`
+(identity+personality) and `dynamic` (memory) kept as **separate fields**,
+not pre-joined into one string. This was the one thing worth getting
+exactly right: `stable` must stay byte-identical across turns that don't
+change personality state, or cloud prompt caching and llama.cpp's KV slot
+cache (CLAUDE.md: "keep the first two byte-stable") silently stop working.
+Tested directly (`test_stable_block_is_byte_identical_regardless_of_memory_or_context`).
+Chat-sourced input is wrapped in `<message source=... trust=...>` and
+labelled `untrusted` regardless of what `config/identity.md` says
+(invariant 6) — voice/manual/ambient get `trusted`. Token budgeting is
+`len(text)//4` (approximate, named `approx_tokens` so it's never mistaken
+for exact); memory is capped to a budget, recent context trims from the
+middle when over budget, never the top (§5.2).
+
+**`brain/cloud.py`** (`AnthropicBackend`) and **`brain/local.py`**
+(`OllamaBackend`) — the two concrete backends, added in a second commit
+once `anthropic`/`httpx` were added as dependencies. Both take an
+injectable `client` so tests fake the SDK/HTTP shape instead of hitting
+the network or spending credits. Both check the cancel token *between*
+chunks, not mid-await — good enough for the common case; a backend that
+stops yielding entirely relies on bus.py's hard-cancel escalation instead
+of perfect cooperative cancellation.
+
+**Decisions made with the user this session:** cloud backend is Anthropic
+(`claude-haiku-4-5-20251001` default, overridable via constructor — not
+yet wired to `config/chao.yaml`, which is still empty); local backend is
+Ollama rather than raw `llama-server` (friendlier to run, still CPU-only,
+still zero-VRAM). `config/identity.md` stays a stub for now — real
+character/trait content is a separate pass with an Opus review when the
+user's ready, per CLAUDE.md's prompt-design escalation rule.
+
+**Not built yet, deliberately deferred:** the turn orchestrator that
+actually satisfies `bus.py`'s `TurnHandler` shape (assembling a `Prompt`,
+publishing `brain.request`/`brain.token`/`brain.complete`, calling a
+backend). That belongs in `brain/__init__.py` or similar, once
+`director/tags.py` exists to consume the token stream — building it
+before there's anything to hand tokens to would be premature. Anthropic
+prompt caching's `cache_control` breakpoints are also deferred — `Prompt`
+keeps the `stable`/`dynamic` seam so that's addable later without a
+refactor, just not implemented now.
+
+30 tests passing (up from 13), ruff clean.
+
 ## Standing decisions made this session
 
 - Git remote confirmed on `jesse-github` SSH alias (see CLAUDE.md's GitHub
@@ -130,12 +187,13 @@ are unaffected. Doc updated to say so rather than leave it stale.
 
 ## Next actions
 
-1. Continue Phase 1: `brain/` (LLM backend protocol + prompt assembly),
-   `director/tags.py` (tolerant tag parser) and `director/director.py`
-   (wires tag stream → mood/emote decisions), then `__main__.py` to wire a
-   real `turn_handler` into `Bus.run()`, then the dashboard skeleton
-   (FastAPI + websocket subscriber) so turns are visible live. Anticipation
-   nudge (§10.5) needs `brain.request` to fire the question-mark ball pop
-   before any audio exists — director-level, not bus-level.
+1. Continue Phase 1: `director/tags.py` (tolerant tag parser) and
+   `director/director.py` (wires tag stream → mood/emote decisions), then
+   the `brain/` turn orchestrator that satisfies `bus.py`'s `TurnHandler`
+   and publishes `brain.request`/`token`/`complete`, then `__main__.py` to
+   wire it into `Bus.run()`, then the dashboard skeleton (FastAPI +
+   websocket subscriber) so turns are visible live. Anticipation nudge
+   (§10.5) needs `brain.request` to fire the question-mark ball pop before
+   any audio exists — director-level, not bus-level.
 2. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
    priority, quick, not expected to change any conclusion).
