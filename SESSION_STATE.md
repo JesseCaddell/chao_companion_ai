@@ -27,11 +27,20 @@ first, then built: `chao.dashboard.server` now also serves the built
 frontend (`web/dist/`) as static files, and a new `chao.dashboard.window`
 entry point opens it in a native window via WebView2 (Windows' built-in
 Chromium-based runtime — reuses what's already on the machine rather than
-adding a separate browser instance). See "Native window presentation"
-below for what was and wasn't verified — no Chrome extension was available
-either time this session, so the actual rendered UI has still never been
-seen by anything with eyes, only proven correct at the HTTP/websocket
-wire level and via the native window process staying alive with no errors.
+adding a separate browser instance). Committed (`20daf1e`).
+
+**Visual verification finally closed out, same session, after both
+commits above:** the Chrome extension failed to connect twice earlier in
+the session (`tabs_context_mcp`: "Browser extension is not connected") —
+turned out to be an environment/login-state issue, not anything
+structurally wrong; it connected cleanly once the user confirmed it was
+actually installed. Opened the dashboard in a real tab, pushed two real
+turns through the running app, and visually confirmed the event feed
+renders exactly as designed (dark theme, correct ordering, correct
+latency/tag/emote data, streaming bubble folding cleanly into history).
+See "Native window presentation" → its "Next actions" closure note for
+detail. The gap flagged twice earlier this session is genuinely resolved,
+not just re-flagged again.
 
 Also this session, before any of the above: the C→D directory move (done
 between sessions, outside a coding session) had silently broken the
@@ -41,11 +50,10 @@ caught and fixed. Ollama got installed and `qwen3:8b` pulled and wired in
 as the local fallback, confirmed CPU-only and working, though slow (as
 expected).
 
-Nothing is broken or mid-edit; 95 tests passing, ruff clean. The dashboard
-skeleton is committed; **the native-window presentation-layer change is
-on disk, tested, and ready, but not yet committed** as of this write-up —
-the user hasn't asked for that commit yet. The only loose end from before
-is `neutral`, still deliberately shelved.
+Nothing is broken or mid-edit; 95 tests passing, ruff clean. Both the
+dashboard skeleton and the native-window presentation layer are
+committed. The only loose end from before is `neutral`, still
+deliberately shelved.
 
 **Pick up here next session:** next actions list at the bottom, roughly in
 priority order. `aliveness.py` is probably the most natural next step now
@@ -737,16 +745,21 @@ is working, but it is not the same as having seen it.
 
 ## Next actions
 
-1. **Visually confirm the dashboard actually renders correctly** — in the
-   `pywebview` window now, not a Chrome tab (that's genuinely obsolete as
-   of this session). Two ways to get there: get the Chrome extension
-   connected (user needs to install it + sign in, see conversation) and
-   at least verify the same HTML/CSS in a tab as a proxy, or find another
-   way to inspect the native window's actual rendered content. Nothing
-   about the wire protocol or the HTTP layer is in question anymore —
-   only "does the CSS layout look right" is still unverified, and it's
-   been unverified for two rounds now. Cheap to close out, worth doing
-   before building anything else on top of it.
+1. ~~Visually confirm the dashboard actually renders correctly~~ — **done,
+   closed out.** The Chrome extension connected successfully once the
+   user confirmed it was actually installed (the earlier failures this
+   session were an environment/login-state issue, not a structural
+   problem). Opened `http://127.0.0.1:8765/` in a real tab (proxy for the
+   `pywebview` window, which renders the same HTML/CSS/JS via the same
+   WebView2 engine) and pushed two real turns through the running app.
+   Confirmed: dark theme renders correctly, "connected" status shows in
+   accent color, both turns appeared in the feed in correct
+   reverse-chronological order with correct latency/tags/emotes, and the
+   streaming bubble folded cleanly into history on each `brain.complete`
+   with no stuck or duplicate entries (both turns completed too fast,
+   under ~1s, to catch a screenshot mid-stream — the fold-in logic is
+   exercised by every successful turn regardless, so this isn't a real
+   gap). The event feed panel is genuinely done, not just wired.
 2. Aliveness — `aliveness.py` is still an empty stub, and it's arguably
    the single highest-value remaining piece of phase 1. Two things live
    here: the meso/macro idle-drift layers (CLAUDE.md's `director/aliveness.py`
