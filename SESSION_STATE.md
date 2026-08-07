@@ -408,22 +408,92 @@ expression FILE names (for `ExpressionActivationRequest`), not literal
 VTS hotkey labels — a 1:1 hotkey exists per expression too, but firing
 should go through the expression file, not `HotkeyTriggerRequest`.
 
+**Follow-up (session 4):** user authored a `neutral` hotkey in VTS, but
+it came in as VTS's built-in **`RemoveAllExpressions`** type, not
+`ToggleExpression` — there's still no `neutral.exp3.json` file, and
+`RemoveAllExpressions` has no file to activate at all. It's a coherent
+design (fire it to clear whatever mood expression is active, back to
+baseline) but it can only be triggered via `HotkeyTriggerRequest` with
+its hotkey ID, not `ExpressionActivationRequest` — a different code path
+than every other pool. Still nothing maps to it (`neutral` isn't in
+`_TAG_TO_POOL`), so `config/emotes.yaml`'s `neutral: { hotkeys: [] }`
+stays correct for now. Whoever wires this up later needs to special-case
+it, not treat it like the other seven pools.
+
+## outputs/vts.py — VTS emote subscriber (session 4)
+
+`VTSEmoteSubscriber.handle(event)` turns `director.emote` into a real
+`ExpressionActivationRequest(active=True)`, then schedules a background
+task to send `active=False` after `duration_s` (pulled from
+`emote_config`, since the event payload only has pool/hotkey_id/reason) —
+enforces CLAUDE.md's "never sustain beyond ~4s" itself rather than
+trusting the caller. Deactivation is a background task specifically so
+`handle()` returns immediately and doesn't block the consumer loop for
+the full hold of an unrelated expression. If the same expression fires
+again before its hold expires, the pending deactivate is cancelled and
+rescheduled (extends the hold) instead of a stale deactivate cutting the
+new activation short — the one genuinely tricky case, covered by its own
+test. VTS failures (either direction) are caught, logged, and published
+as `Kind.ERROR` rather than crashing the subscriber or the app.
+
+Wired into `__main__.py` as a third background task (alongside the
+console printer and the bus runner). Connects/authenticates once at
+startup; degrades gracefully — prints a message, keeps the chat loop
+running — if VTS isn't up or auth is rejected, rather than crashing the
+whole process over an optional output.
+
+**Verified live, visually confirmed by the user** — but it took three
+attempts: the first two runs (through the full `__main__.py` pipeline)
+produced no visible reaction, which looked like a real bug. Root cause
+turned out to be entirely mundane: the user didn't have the VTS window
+in view at the moment the 2-2.5s expression fired. An isolated
+diagnostic script with a 5s countdown and a 6s hold (long enough to
+switch windows and still catch it) confirmed the subscriber works
+correctly end-to-end. Worth remembering: a "nothing happened" report
+after a fire-and-auto-clear action needs "were you looking at the right
+moment" ruled out before assuming the code is broken.
+
+90 tests passing (up from 83 — 7 new in `test_outputs_vts.py`), ruff
+clean.
+
+## Project plan addition: TTS, subtitles, personality test segment (session 4)
+
+User request, not yet implemented — logged in design doc §17/§18/§19 so
+it isn't lost before phase 2 starts:
+
+- **TTS** was already phase 2's headline deliverable (`Piper (CPU) —
+  re-evaluate options at phase 2`, §18) — still needs an actual model
+  selected when phase 2 starts, not just "Piper" as a placeholder.
+- **Subtitle overlay for the stream** is new — a viewer-facing surface,
+  explicitly separate from the dashboard (which CLAUDE.md already
+  establishes as streamer-only debug tooling). Likely a lightweight
+  browser-source page driven by `brain.token`/`output.speech_start`/`end`,
+  design TBD at phase 2. Added as its own row in §18's tech table and
+  open question 7.
+- **A dedicated personality/voice testing segment** — a way to iterate on
+  the chao's character and TTS voice without a live audience. Likely an
+  extension of `__main__.py`'s typed-input loop (already proven this
+  session) once TTS exists, rather than a new tool — noted as open
+  question 6, to actually decide at phase 2, not before.
+
 ## Next actions
 
 1. The dashboard skeleton (FastAPI + websocket subscriber) so turns are
    visible without reading console output — `_print_events` in `__main__.py`
    is a throwaway stand-in, not meant to survive.
-2. A subscriber that turns `director.emote` into real VTS
-   `ExpressionActivationRequest` calls (outputs/vts.py currently only has
-   the thin transport client from phase 0) — unblocked now that
-   `config/emotes.yaml`'s names are confirmed.
-3. User: author a default-state `neutral` expression in VTS, then add its
-   file name to `config/emotes.yaml`'s `neutral` pool.
-4. Anticipation nudge (§10.5) needs something subscribing to
+2. User: author a default-state `neutral` expression in VTS as an actual
+   `ToggleExpression`/expression file (the current `neutral` hotkey is a
+   `RemoveAllExpressions` action, which needs different code to fire —
+   see the follow-up note above) — or decide `RemoveAllExpressions` is
+   actually what's wanted and the emote subscriber gets a special case.
+3. Anticipation nudge (§10.5) needs something subscribing to
    `brain.request` to pop the question-mark ball before audio exists —
    that's aliveness.py's job, not yet built.
-5. If/when Ollama gets installed, pull a real model and set
+4. If/when Ollama gets installed, pull a real model and set
    `CHAO_OLLAMA_MODEL` (or update `DEFAULT_OLLAMA_MODEL` in `__main__.py`) —
    the fallback path is currently untested against a real server.
-6. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
+5. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
    priority, quick, not expected to change any conclusion).
+6. Phase 2 kickoff, when ready: pick a TTS model (Piper is the current
+   placeholder, §18), and scope the subtitle overlay + personality/voice
+   test segment noted above — none of the three are started yet.

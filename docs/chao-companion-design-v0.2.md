@@ -715,7 +715,7 @@ Sequenced by uncertainty, not dependency. Prove the unknowns first.
 |---|---|---|
 | **0** | Connect to VTS, authenticate, dump `Live2DParameterListRequest`, trigger a hotkey, inject a custom parameter | The only genuinely unknown integration — and whether the ball has position params |
 | **1** | Typed text → LLM → tags → emote fires. **Dashboard live.** Anticipation nudge works. | End-to-end brain and director |
-| **2** | TTS, audio routing, envelope-driven motion, ball spring | The chao appears to speak |
+| **2** | TTS, audio routing, envelope-driven motion, ball spring, stream subtitle overlay, personality/voice test segment | The chao appears to speak |
 | **3** | Aliveness: idle noise, attention, reactive silence, fly state machine | The chao appears alive |
 | **4** | Twitch chat, selection policy, kill switch | First live test possible |
 | **5** | Voice input with VAD | Full conversational loop |
@@ -725,6 +725,8 @@ Sequenced by uncertainty, not dependency. Prove the unknowns first.
 Phase 3 before phase 4 is deliberate. A chao that idles beautifully and says nothing is a better stream presence than one that talks well and stares blankly between responses.
 
 The dashboard lands in phase 1, not later. Every phase after it is faster because it exists.
+
+Phase 2 also needs a stream-facing subtitle overlay — separate from the dashboard, which is a streamer-only debug tool, not something viewers see — and a personality/voice test segment: a way to iterate on the chao's character and TTS voice without a live audience. The test segment is likely an extension of `__main__.py`'s typed-input loop (already proven in phase 1) once TTS exists, rather than a separate tool.
 
 ---
 
@@ -745,6 +747,7 @@ The dashboard lands in phase 1, not later. Every phase after it is faster becaus
 | VTS client | `pyvts`, or ~150 lines of raw websocket |
 | Audio routing | VB-Audio Virtual Cable |
 | Dashboard | FastAPI + Vite/React + uPlot |
+| Subtitle overlay | TBD, phase 2 — likely a lightweight browser-source page (transparent bg, OBS-captured) driven by `brain.token`/`output.speech_start`/`output.speech_end`, separate from the dashboard |
 
 The TTS landscape moves quickly; re-evaluate at phase 2 rather than committing now.
 
@@ -757,3 +760,5 @@ The TTS landscape moves quickly; re-evaluate at phase 2 rather than committing n
 3. **Should the chao hear game audio?** Reacting to what you're playing is compelling but adds an audio-classification pipeline. Deferred past v1.
 4. **What is the chao's voice?** Piper voice selection at phase 2; pitch shifting may be needed to match the character.
 5. **How is affinity earned and lost?** The scoring function needs design before phase 7 — sentiment alone is probably too noisy.
+6. **Where does the personality/voice test segment live?** Likely `__main__.py`'s existing typed-input loop, extended once TTS exists — not a separate tool. Needs deciding at phase 2 alongside the TTS model itself.
+7. **What does the subtitle overlay actually look like?** Separate surface from the dashboard (viewer-facing, not streamer-only); design TBD at phase 2 — see §18.
