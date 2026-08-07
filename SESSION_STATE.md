@@ -204,6 +204,58 @@ leading/trailing whitespace surviving between chunks.
 
 48 tests passing (up from 30), ruff clean.
 
+## director/director.py — tag stream to emote decisions (session 3, cont'd)
+
+`Director` buffers `brain.token` chunks to sentence boundaries
+(`process_chunk`/`end_turn`), parses tags per completed sentence via
+`tags.parse_tags`, maps recognized tags to an emote pool (§6.2 —
+happy/affection→happy, curious/thinking→curious, surprise/confused/sad/angry
+→ themselves; `pause`/`look:*` produce `director.tag` telemetry but never
+an emote) and fires it via `director.emote`, gated by a per-pool cooldown
+and "never the same hotkey twice consecutively" (only meaningful with 2+
+hotkeys per pool — current config has 1 each, so it always repeats, which
+is correct). Publishes events only — no VTS calls. `publish` is just
+`bus.publish` (sync for non-turn-triggering kinds), so Director itself
+needs no `async` at all.
+
+Deliberately out of scope this pass: mood valence/arousal (`mood.py`,
+still its own empty stub — no `director.mood` published), the `heart`
+pool (§6.3, affinity-gated, needs memory/phase 6), fly (`aliveness.py`
+owns `state.fly`). Firing is immediate — no TTS exists yet to schedule
+against. The single `self.publish(...)` call in `_maybe_fire_emote` is the
+seam where CLAUDE.md's "schedule against the audio playback clock, not
+token arrival" gets wired in during phase 2.
+
+`config/emotes.yaml` populated with the design doc's §14 example (pools +
+fly + heart_gate + reactions) — **hotkey names (`chao.happy` etc.) are
+provisional**, copied from the doc, not yet confirmed against this
+model's actual VTS hotkey list. Confirm before outputs/vts.py wires
+`director.emote` up to real `ExpressionActivationRequest` calls. Added
+`pyyaml` to load it; only the `pools` section is read so far.
+
+Advisor review caught two real bugs before commit:
+- `end_turn()` cleared `_turn_id` *before* publishing the final flush's
+  events, so the LLM's last sentence — the one most likely to lack
+  trailing punctuation and therefore go through the flush path — always
+  published with `turn_id=None`, breaking the latency-waterfall/prompt-
+  re-run use of that field. Fixed by clearing after.
+- The sentence-buffering "safe prefix" had an extra guard that held back
+  the *entire remaining buffer* whenever the about-to-be-released prefix
+  contained an unmatched `[`. Reachability analysis: a well-formed tag's
+  contents can't contain `.!?` or whitespace, so a real tag can never
+  straddle a sentence-terminator split point — the guard could only ever
+  fire on a genuinely malformed stray `[` in prose, and in that case it
+  silently stalled *all further sentence streaming for the rest of the
+  turn* (nothing would release until `end_turn()`), quietly defeating
+  §12's sentence-streaming latency budget for a case tags.py already
+  tolerates fine on its own (leaves it as literal text). Removed. Sentence
+  boundary regex de-duplicated: `tags.SENTENCE_BOUNDARY` is now public and
+  imported by director.py instead of a second copy — the two had to stay
+  identical for `sentence_index` to line up, so keeping one copy removes a
+  whole class of drift bug.
+
+68 tests passing (up from 48), ruff clean.
+
 ## Standing decisions made this session
 
 - Git remote confirmed on `jesse-github` SSH alias (see CLAUDE.md's GitHub
@@ -216,14 +268,17 @@ leading/trailing whitespace surviving between chunks.
 
 ## Next actions
 
-1. Continue Phase 1: `director/director.py` (wires tag stream → mood/emote
-   decisions — needs to buffer `brain.token` chunks to complete
-   tags/sentences before calling `tags.parse_tags`, per the precondition
-   above), then the `brain/` turn orchestrator that satisfies `bus.py`'s
-   `TurnHandler` and publishes `brain.request`/`token`/`complete`, then
-   `__main__.py` to wire it into `Bus.run()`, then the dashboard skeleton
-   (FastAPI + websocket subscriber) so turns are visible live. Anticipation nudge
-   (§10.5) needs `brain.request` to fire the question-mark ball pop before
-   any audio exists — director-level, not bus-level.
-2. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
+1. Continue Phase 1: the `brain/` turn orchestrator that satisfies
+   `bus.py`'s `TurnHandler` — assembles a `Prompt`, publishes
+   `brain.request`/`token`/`complete`, calls a backend, feeds tokens into
+   `Director.process_chunk`/`end_turn`. Then `__main__.py` to wire it into
+   `Bus.run()`, then the dashboard skeleton (FastAPI + websocket
+   subscriber) so turns are visible live. Anticipation nudge (§10.5) needs
+   `brain.request` to fire the question-mark ball pop before any audio
+   exists — director-level, not bus-level.
+2. Before outputs/vts.py subscribes to `director.emote`: confirm
+   `config/emotes.yaml`'s hotkey names (`chao.happy` etc.) against this
+   model's actual VTS hotkey list — they're copied from the design doc's
+   example, unverified.
+3. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
    priority, quick, not expected to change any conclusion).
