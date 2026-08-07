@@ -175,6 +175,35 @@ refactor, just not implemented now.
 
 30 tests passing (up from 13), ruff clean.
 
+## director/tags.py — tolerant tag parser (session 3, cont'd)
+
+`parse_tags(text) -> (cleaned_text, list[ParsedTag])`, pure and stateless
+per §9. Two-stage matching: anything bracket-shaped (`[word]` or
+`[word:word]`) is stripped from output regardless of recognition, so a
+hallucinated `[proud]` or `[laughs]` never reaches TTS; only names/values
+in `KNOWN_TAGS`/`KNOWN_LOOK_TARGETS` become a `ParsedTag`. Unclosed
+brackets and multi-word bracketed asides are left as literal text —
+deliberately not guessed at. Also exports `split_sentences`, reused by
+whatever in director.py buffers to sentence boundaries.
+
+Advisor review caught a real bug before commit: a trailing tag (nothing
+after it, e.g. a sign-off `[happy]`) produced a `sentence_index` one past
+the end of `split_sentences(cleaned)` — an `IndexError` waiting for
+director.py, which will schedule emotes by indexing into the sentence
+list. Fixed by clamping to the last real sentence index. Tests added for
+both the trailing-tag case and tag-only input (empty cleaned text).
+
+**Important precondition for director.py, documented in tags.py's
+docstring but not enforced by it:** `parse_tags` must only be called on
+text whose tags are already complete. `brain.token` arrives as chunks —
+`[hap` / `py]` split across a chunk boundary won't match either half, and
+both fragments would leak into TTS as literal text. Buffering partial
+tokens until tags (and ideally sentence boundaries) are complete is
+director.py's job. Whitespace is collapsed per call too, so don't rely on
+leading/trailing whitespace surviving between chunks.
+
+48 tests passing (up from 30), ruff clean.
+
 ## Standing decisions made this session
 
 - Git remote confirmed on `jesse-github` SSH alias (see CLAUDE.md's GitHub
@@ -187,12 +216,13 @@ refactor, just not implemented now.
 
 ## Next actions
 
-1. Continue Phase 1: `director/tags.py` (tolerant tag parser) and
-   `director/director.py` (wires tag stream → mood/emote decisions), then
-   the `brain/` turn orchestrator that satisfies `bus.py`'s `TurnHandler`
-   and publishes `brain.request`/`token`/`complete`, then `__main__.py` to
-   wire it into `Bus.run()`, then the dashboard skeleton (FastAPI +
-   websocket subscriber) so turns are visible live. Anticipation nudge
+1. Continue Phase 1: `director/director.py` (wires tag stream → mood/emote
+   decisions — needs to buffer `brain.token` chunks to complete
+   tags/sentences before calling `tags.parse_tags`, per the precondition
+   above), then the `brain/` turn orchestrator that satisfies `bus.py`'s
+   `TurnHandler` and publishes `brain.request`/`token`/`complete`, then
+   `__main__.py` to wire it into `Bus.run()`, then the dashboard skeleton
+   (FastAPI + websocket subscriber) so turns are visible live. Anticipation nudge
    (§10.5) needs `brain.request` to fire the question-mark ball pop before
    any audio exists — director-level, not bus-level.
 2. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
