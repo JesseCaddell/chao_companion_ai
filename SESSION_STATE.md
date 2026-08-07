@@ -346,6 +346,36 @@ choice stays a `cloud.py` constant, not yet configurable.
 real Anthropic API in this session (needs `ANTHROPIC_API_KEY` set and
 spends credits) — wiring is verified, live behavior isn't.
 
+## `.env` support + first live run (session 3, cont'd)
+
+Added `python-dotenv`; `main()` calls `load_dotenv()` before the API key
+check, so a local `.env` (gitignored, template in `.env.example`) is
+picked up automatically — no more setting the env var by hand per shell
+session.
+
+**Ran the full pipeline live for the first time this session** — typed
+input → real Anthropic call → tags → Director → emotes, end to end.
+First attempt crashed: `CircuitBreakerBackend`'s `first_token_timeout_s`
+default (2.0s, from CLAUDE.md's "~2s" note) was tripping on a *working*
+call — a cold Anthropic connection (fresh TLS handshake, no keep-alive)
+measured ~2.25s to first token, just over the threshold, so it fell back
+to Ollama, which isn't installed, and the turn crashed with a connection
+error. Confirmed by calling `AnthropicBackend` directly outside the
+breaker (worked fine, ~2.25s to first token). Bumped the default to
+5.0s — verified against `test_brain_backend.py` (all tests pass explicit
+values, unaffected) and a second live run, which completed cleanly in
+~3.1s with both `[happy]` and `[curious]` firing real `director.emote`
+events (`chao.happy`, `chao.question`).
+
+This is the first real evidence the identity.md placeholder's tag
+instructions work — the model used tags correctly, once per sentence,
+at sentence start, unprompted for specifics beyond the placeholder's
+example.
+
+83 tests passing (unchanged — no new tests needed: `load_dotenv()` is
+I/O, not unit-tested, and `test_brain_backend.py` already covers the
+breaker's timeout behavior via explicit values), ruff clean.
+
 ## Standing decisions made this session
 
 - Git remote confirmed on `jesse-github` SSH alias (see CLAUDE.md's GitHub
@@ -358,26 +388,20 @@ spends credits) — wiring is verified, live behavior isn't.
 
 ## Next actions
 
-1. Actually run `uv run python -m chao` live with `ANTHROPIC_API_KEY` set —
-   this hasn't happened yet this session, so the pipeline is wiring-verified
-   but not behavior-verified against the real API. Watch for whether `[tag]`
-   placement/frequency from the placeholder identity.md prompt is usable, and
-   whether `system=""` edge cases matter (they shouldn't now that
-   identity.md has content, but worth noting if something looks off).
-2. Then the dashboard skeleton (FastAPI + websocket subscriber) so turns are
+1. The dashboard skeleton (FastAPI + websocket subscriber) so turns are
    visible without reading console output — `_print_events` in `__main__.py`
    is a throwaway stand-in, not meant to survive.
-3. A subscriber that turns `director.emote` into real VTS
+2. A subscriber that turns `director.emote` into real VTS
    `ExpressionActivationRequest` calls (outputs/vts.py currently only has
-   the thin transport client from phase 0). Blocked on action 4.
-4. Before that: confirm `config/emotes.yaml`'s hotkey names (`chao.happy`
+   the thin transport client from phase 0). Blocked on action 3.
+3. Before that: confirm `config/emotes.yaml`'s hotkey names (`chao.happy`
    etc.) against this model's actual VTS hotkey list — they're copied from
    the design doc's example, unverified.
-5. Anticipation nudge (§10.5) needs something subscribing to
+4. Anticipation nudge (§10.5) needs something subscribing to
    `brain.request` to pop the question-mark ball before audio exists —
    that's aliveness.py's job, not yet built.
-6. If/when Ollama gets installed, pull a real model and set
+5. If/when Ollama gets installed, pull a real model and set
    `CHAO_OLLAMA_MODEL` (or update `DEFAULT_OLLAMA_MODEL` in `__main__.py`) —
    the fallback path is currently untested against a real server.
-7. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
+6. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
    priority, quick, not expected to change any conclusion).
