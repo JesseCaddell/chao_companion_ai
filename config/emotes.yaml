@@ -1,26 +1,36 @@
 # Emote pools, hotkey selection, and reaction mapping. See design doc §14.
 #
-# `hotkeys` names are provisional — copied from the design doc's example,
-# not yet confirmed against this model's actual VTS hotkey list. Verify
-# before outputs/vts.py wires these up to real ExpressionActivationRequest
-# calls.
+# `hotkeys` values are confirmed live against this model's VTS instance
+# (queried via ExpressionStateRequest/HotkeysInCurrentModelRequest,
+# 2026-08-07) — they're the real expression FILE names, e.g.
+# "happy.exp3.json", not arbitrary hotkey labels. CLAUDE.md's phase-0
+# finding is that emotes fire via ExpressionActivationRequest (explicit
+# active: true/false), not HotkeyTriggerRequest — a hotkey with the same
+# name exists 1:1 per expression but outputs/vts.py should call the
+# expression file directly, not trigger the hotkey.
+#
+# `neutral` has NO matching expression in VTS yet — confirmed missing,
+# not just unverified. Nothing currently fires it (no tag maps to
+# "neutral" in director.py's _TAG_TO_POOL), so leaving hotkeys empty is
+# safe for now. Once a default-state expression is authored in VTS, fill
+# in its file name here.
 #
 # director.py currently only reads `pools`. `fly` and `heart_gate` belong
 # to aliveness.py/mood.py (not built yet); `reactions` belongs to whatever
 # drives non-verbal-only reactions (§10.4), also not built yet.
 
 pools:
-  happy:      { hotkeys: [chao.happy], cooldown_s: 4, duration_s: 2.5 }
-  heart:      { hotkeys: [chao.heart], cooldown_s: 12, duration_s: 3.0 }
-  curious:    { hotkeys: [chao.question], cooldown_s: 3, duration_s: 2.0 }
-  surprise:   { hotkeys: [chao.surprise], cooldown_s: 6, duration_s: 1.5 }
-  confused:   { hotkeys: [chao.confused], cooldown_s: 8, duration_s: 3.0 }
-  sad:        { hotkeys: [chao.sad], cooldown_s: 10, duration_s: 4.0 }
-  angry:      { hotkeys: [chao.angry], cooldown_s: 15, duration_s: 3.0 }
-  neutral:    { hotkeys: [chao.neutral], cooldown_s: 0, duration_s: 0 }
+  happy:      { hotkeys: [happy.exp3.json], cooldown_s: 4, duration_s: 2.5 }
+  heart:      { hotkeys: [heart.exp3.json], cooldown_s: 12, duration_s: 3.0 }
+  curious:    { hotkeys: [question.exp3.json], cooldown_s: 3, duration_s: 2.0 }
+  surprise:   { hotkeys: [surprise.exp3.json], cooldown_s: 6, duration_s: 1.5 }
+  confused:   { hotkeys: [confused.exp3.json], cooldown_s: 8, duration_s: 3.0 }
+  sad:        { hotkeys: [sad.exp3.json], cooldown_s: 10, duration_s: 4.0 }
+  angry:      { hotkeys: [angry.exp3.json], cooldown_s: 15, duration_s: 3.0 }
+  neutral:    { hotkeys: [], cooldown_s: 0, duration_s: 0 }  # pending: no VTS expression yet
 
 fly:
-  hotkey: chao.fly
+  hotkey: fly.exp3.json
   on_above: 0.70
   off_below: 0.40
   min_dwell_s: 5
