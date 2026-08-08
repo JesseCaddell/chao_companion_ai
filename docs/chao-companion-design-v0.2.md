@@ -228,20 +228,17 @@ At typical small-tier rates this lands in the low single digits of dollars per m
 
 ### 5.2 Local CPU (dev and reflection)
 
-`llama.cpp` server, OpenAI-compatible endpoint, 8B-class instruct model at Q4_K_M.
+**Update (phase 1 implementation):** built against **Ollama**, not a raw `llama.cpp` server as originally planned — `OllamaBackend` (`src/chao/brain/local.py`) speaks Ollama's `/api/chat` streaming endpoint at `http://localhost:11434`. Same underlying idea (CPU-only, quantized 8B-class GGUF inference, zero VRAM via `OLLAMA_NUM_GPU=0`), different delivery mechanism — Ollama's own model management (`ollama pull`, `OLLAMA_MODELS` to relocate storage off the system drive) replaced hand-rolling a `llama.cpp` server process. Confirmed working: `qwen3:8b`.
 
 | Property | Value |
 |---|---|
-| RAM | ~5.5 GB of 32 GB |
-| VRAM | 0 GB |
-| Threads | `--threads 8` (leave headroom for the game) |
-| Context | 4096 |
-| Generation | ~7–9 tok/s |
-| Time to first token | ~0.4–0.8s warm |
+| VRAM | 0 GB (`OLLAMA_NUM_GPU=0`) |
+| Model | `qwen3:8b`, CPU-only |
+| Cold load | Real but not free — see `SESSION_STATE.md` for current measured figures; varies by run, don't treat any single number here as current |
 
 The generation rate looks alarming and mostly isn't, because of sentence streaming (§12) — only time-to-first-token is perceptible. The real risk on CPU is **prefill**: reprocessing a 3000-token prompt every turn costs seconds. Mitigations:
 
-- Keep identity and personality blocks byte-stable so llama.cpp's slot cache can reuse the KV
+- Keep identity and personality blocks byte-stable so the KV/slot cache can reuse them
 - Cap retrieved memory to a fixed token budget
 - Trim conversation history from the middle, never the top
 
@@ -572,7 +569,7 @@ class Event:
 | `brain.complete` | brain | full_text, latency_ms, usage |
 | `director.tag` | director | tag, sentence_index |
 | `director.emote` | director | pool, hotkey_id, reason |
-| `director.mood` | director | valence, arousal, baseline |
+| `director.mood` | director | valence, arousal, baseline_valence, baseline_arousal |
 | `output.speech_start` / `end` | tts | sentence, duration_ms |
 | `vts.param` | vts | name, value (sampled, not every frame) |
 | `state.fly` | aliveness | flying, trigger |
@@ -741,9 +738,9 @@ Phase 2 also needs a stream-facing subtitle overlay — separate from the dashbo
 | Twitch | `twitchio` |
 | VAD | `silero-vad` |
 | STT | `faster-whisper` base, int8, **CPU** |
-| TTS | Piper (CPU) — re-evaluate options at phase 2 |
+| TTS | Piper (CPU) — confirmed at phase 2 kickoff; voice selection still open (§19) |
 | LLM (cloud) | Small/fast tier, streaming, prompt caching on |
-| LLM (local) | `llama.cpp` server, 8B Q4_K_M, CPU |
+| LLM (local) | Ollama (`qwen3:8b`), CPU-only via `OLLAMA_NUM_GPU=0` — see §5.2 |
 | Embeddings | `bge-small-en` or `all-MiniLM-L6-v2`, CPU |
 | Storage | SQLite + `sqlite-vec` |
 | VTS client | `pyvts`, or ~150 lines of raw websocket |
@@ -758,7 +755,7 @@ The TTS landscape moves quickly; re-evaluate at phase 2 rather than committing n
 ## 19. Open questions
 
 1. **Does the ball have independent position parameters?** Yes, as of the rigger's update: `xp4`/`yp5` (ball X/Y) plus `yp6` (bubble scale, unrelated to position), all in a new physics group. The lag is native to the rig's physics — no code-side spring needed for §8.2. Verified with face tracking off: moving the model in VTS makes the ball lag on its own, no plugin binding required. `docs/rigging_check_list.md` item 1 is resolved.
-2. **Which emote additions from §6.5 get mapped, and when?** Neutral is blocking for phase 1. Ellipsis is the highest-value optional.
+2. **Which emote additions from §6.5 get mapped, and when?** **Update:** `neutral` turned out not to block phase 1 in practice — nothing currently fires it (no tag maps to it), so it shipped without a matching VTS expression, shelved until it resurfaces (see `SESSION_STATE.md`). Ellipsis is still the highest-value optional, not yet built.
 3. **Should the chao hear game audio?** Reacting to what you're playing is compelling but adds an audio-classification pipeline. Deferred past v1.
 4. **What is the chao's voice?** Piper voice selection at phase 2; pitch shifting may be needed to match the character.
 5. **How is affinity earned and lost?** The scoring function needs design before phase 7 — sentiment alone is probably too noisy.

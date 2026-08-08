@@ -60,6 +60,56 @@ app subscribes, which only a live run against real VTS could surface.
 
 122 tests still passing (no new ones — see above), ruff clean.
 
+**Design doc review, same session, closing it out:** user asked for a
+staleness pass over `chao-companion-design-v0.2.md` before ending for the
+day, on the correct instinct that several sessions' worth of real
+decisions hadn't been reconciled back into it. Read the full document
+end to end against current code/CLAUDE.md/this file. Found and fixed:
+
+- **§5.2 / §18, real discrepancy, not just wording:** the doc still
+  described the local LLM backend as a raw `llama.cpp` server (OpenAI-
+  compatible endpoint, `--threads 8`, specific RAM/tok-s figures). Actual
+  phase-1 implementation (`src/chao/brain/local.py`, built session 4-ish)
+  is `OllamaBackend` against Ollama's own `/api/chat` endpoint —
+  `qwen3:8b`, zero-VRAM via `OLLAMA_NUM_GPU=0`, model storage relocated
+  via `OLLAMA_MODELS`. Same intent (CPU-only quantized 8B inference),
+  different mechanism, and the doc named the wrong one. Rewrote §5.2 and
+  §18's LLM (local) row to describe Ollama; deliberately did not restate
+  specific RAM/cold-load numbers in the design doc itself (session notes
+  disagree with each other across sessions on the exact cold-load figure
+  — ~57s in one place, ~2min in another, likely different measurement
+  conditions) — pointed at `SESSION_STATE.md` instead of asserting a
+  number the doc can't keep current.
+- **§19 open question 2, stale status claim:** said "Neutral is blocking
+  for phase 1." It wasn't, in practice — phase 1 shipped (dashboard live,
+  anticipation nudge built and now visually confirmed) with `neutral`
+  unmapped and shelved, exactly as CLAUDE.md and this file's next-actions
+  list have said for several sessions. Updated to reflect that.
+- **§13 event schema, minor:** `director.mood`'s payload column said
+  `valence, arousal, baseline` (singular) — actual implemented payload
+  from `mood.py` is `{valence, arousal, baseline_valence,
+  baseline_arousal}` (two dims, not one combined value). Corrected the
+  table.
+- **§18 TTS row, minor:** updated "re-evaluate options at phase 2" to
+  reflect that the re-evaluation happened this session (Piper confirmed,
+  see above) rather than leaving it perpetually phrased as pending.
+
+**Not changed, checked and found still accurate:** §7's plugin-parameter
+binding explanation, the file tree, the phase table's shape (it's a
+target-state document, not a progress tracker — SESSION_STATE.md is
+correctly the place completion status lives, not the design doc), and
+the event schema's other rows.
+
+**End of day 2026-08-08.** This closes out sessions 6-8: aliveness's
+anticipation nudge, mood.py, the TTS engine decision, the ANTHROPIC_API_KEY
+verification, the VTS subscriber race fix (with live visual confirmation),
+and this design doc reconciliation. See "Next actions" below for what's
+still open going into the next session — `motion.py` is next in line,
+gated on either the attention model (buildable now, not live-verifiable
+without Twitch/voice input) or picking a TTS model's actual voice
+(now that Piper is confirmed) to give `motion.py`'s envelope extraction a
+real interface to build against.
+
 ## Stopping point (end of session 7, 2026-08-08)
 
 Built `director/mood.py` — the valence/arousal half of the aliveness layer
