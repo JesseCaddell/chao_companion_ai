@@ -91,7 +91,20 @@ async def _run_vts_subscriber(bus: Bus, emote_config: EmoteConfig) -> None:
     ExpressionActivationRequest calls. Degrades gracefully, not fatally, if
     VTS isn't running or rejects auth — the chat loop is still useful
     without it, it just won't show anything on the model.
+
+    Subscribes to the bus *before* the connect/authenticate round trip, not
+    after. `Bus.subscribe()` has no replay for late subscribers -- with the
+    subscribe call after those awaits, a fast first turn (input typed/piped
+    right at startup) could fire the §10.5 anticipation nudge before this
+    coroutine finished its real network handshake with VTS, silently
+    dropping it with no error anywhere, since nothing actually failed.
+    Confirmed live: two runs missed the nudge with a clean exit and no VTS
+    error, isolated to this ordering by a direct ExpressionActivationRequest
+    test that worked fine outside the app. Subscribing first means any
+    event published during the handshake just queues up normally instead of
+    vanishing.
     """
+    sub = bus.subscribe()
     client = VTSClient()
     try:
         await client.connect()
@@ -101,7 +114,6 @@ async def _run_vts_subscriber(bus: Bus, emote_config: EmoteConfig) -> None:
         return
 
     subscriber = VTSEmoteSubscriber(client=client, emote_config=emote_config, publish=bus.publish)
-    sub = bus.subscribe()
     try:
         while True:
             event = await sub.get()

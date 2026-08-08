@@ -4,6 +4,62 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
+## Stopping point (end of session 8, 2026-08-08)
+
+Picked the TTS engine (**Piper**, confirming the design doc's existing
+placeholder — it's the only option that satisfies invariant 1 at the
+existing 200ms first-chunk latency budget; GPU-oriented alternatives were
+ruled out on that basis, not on quality). Voice selection is explicitly
+deferred: user wants a childlike voice, is willing to pay for one, but
+wants to start with any free default Piper voice so pipeline work (audio
+routing, envelope extraction) isn't blocked on finding the "right" voice
+first. Swapping the voice file later is a config change, not a pipeline
+change, so nothing built against a placeholder voice needs rework.
+
+**Verified `ANTHROPIC_API_KEY` is valid** — session 6's "primary backend
+failed before first token" finding was real but wasn't the key: a live
+call through the actual `AnthropicBackend` class (not just the raw SDK)
+succeeded cleanly. Whatever caused the two session-6 failures is still
+unexplained, but it isn't an expired/invalid key. Not chased further since
+it hasn't recurred.
+
+**Found and fixed a real bug, not a phantom one: the §10.5 anticipation
+nudge was silently invisible on every fresh app start.** With VTS actually
+open (first time this project has had a live VTS instance available
+during a session), the ball never showed the question mark on two
+consecutive live runs — no error anywhere, clean shutdown both times. A
+direct, isolated `ExpressionActivationRequest` against `question.exp3.json`
+(bypassing the whole app) worked immediately and visibly, which ruled out
+VTS/the expression file itself and pointed at the app's own wiring.
+
+Root cause: `__main__.py`'s `_run_vts_subscriber` called `bus.subscribe()`
+**after** `await client.connect()` / `await client.authenticate()` — both
+real network round trips to VTS. `Bus.subscribe()` (see `bus.py`) has no
+event replay for late subscribers; a fast first turn (input arriving
+essentially at process start, as it does with piped/scripted input, and
+plausibly with fast manual typing too) could fire `brain.request` →
+`Aliveness`'s anticipation nudge → `director.emote` before the VTS
+subscriber's queue even existed, silently dropping the event forever with
+nothing anywhere to indicate it happened — no exception, no `Kind.ERROR`,
+no "VTS unavailable" message, because nothing actually failed. **Fix:**
+move `sub = bus.subscribe()` to before the connect/authenticate calls, so
+anything published during that handshake queues up normally instead of
+vanishing. Verified live, twice, after the fix: both the anticipation
+nudge (`question`) and a tag-triggered `happy` emote from the actual reply
+fired and were visually confirmed by the user. `docs/rigging_check_list.md`
+item 2 (visual confirmation of the anticipation nudge) is now genuinely
+closed, not just deterministically tested.
+
+No new unit test added for this fix — it's a startup-ordering bug in live
+process wiring (`__main__.py`), not testable the way `Mood`/`Aliveness`'s
+pure logic is; the existing bus-level integration test
+(`test_aliveness_fires_anticipation_emote_on_a_real_bus`) already proves
+the event ordering is correct once a subscriber exists, which is the part
+that's actually unit-testable. The bug was specifically in *when* the real
+app subscribes, which only a live run against real VTS could surface.
+
+122 tests still passing (no new ones — see above), ruff clean.
+
 ## Stopping point (end of session 7, 2026-08-08)
 
 Built `director/mood.py` — the valence/arousal half of the aliveness layer
@@ -950,13 +1006,13 @@ is working, but it is not the same as having seen it.
      subscriber in `outputs/vts.py` to inject them. Binding before the
      design says what it needs risks binding the wrong things — hold off
      until there's a concrete target list.
-   - **Also outstanding:** visually confirm the anticipation nudge in real
-     VTS — verified via a deterministic bus-level integration test (event
-     ordering pinned, non-flaky across 5 runs) and the existing dashboard
-     websocket-relay tests, but VTS wasn't running on this machine either
-     session, so nobody has actually watched the question mark pop live
-     yet. Cheap to close next time VTS is open: run the app, type
-     anything, watch the model.
+   - ~~Visually confirm the anticipation nudge in real VTS~~ — **done
+     session 8.** Found a real bug in the process: `_run_vts_subscriber`
+     subscribed to the bus *after* the VTS connect/authenticate round trip,
+     so a fast first turn could fire the nudge before anything was
+     listening — silently dropped, no error anywhere. Fixed by subscribing
+     before that I/O. Confirmed live afterward: both the anticipation
+     nudge and a tag-triggered `happy` emote fired and were visually seen.
 3. `neutral` is shelved, not urgent — nothing fires it yet. When it
    resurfaces: either figure out the model's rest-state parameter values
    well enough to author a real `neutral.exp3.json` (may need the
@@ -975,18 +1031,21 @@ is working, but it is not the same as having seen it.
    time.
 5. Optionally close the minor gap: slider-test `Param`–`Param5` in VTS (low
    priority, quick, not expected to change any conclusion).
-6. Phase 2 kickoff, when ready: pick a TTS model (Piper is the current
-   placeholder, §18), and scope the subtitle overlay + personality/voice
-   test segment noted above — none of the three are started yet.
+6. Phase 2 kickoff: ~~pick a TTS model~~ — **done session 8, Piper**
+   (confirmed, not changed — the only CPU/zero-VRAM option at the doc's
+   200ms latency budget). Voice selection itself is still open: user wants
+   a childlike voice and is willing to pay for one, but wants to start
+   with any free default Piper voice so pipeline work isn't gated on
+   finding it first — pick a placeholder voice file when actually
+   installing Piper, revisit later, revisit means a config change only.
+   Subtitle overlay + personality/voice test segment (§18) still not
+   started.
 7. Once the dashboard's event feed panel has been used for a bit and its
    rough edges are known, consider the next panel per §11.2's priority
    order (retrieval trace and mood plot both still need their underlying
    features built first, so realistically this is a phase-6+ concern).
-8. **New this session:** the cloud backend failed before first token on
-   two separate live attempts (see the stopping-point writeup above),
-   something that worked fine in session 5 — check whether
-   `ANTHROPIC_API_KEY` is still valid before assuming it's a real bug.
-   Not urgent in the sense that the circuit breaker degrades gracefully
-   (falls back to local), but every live turn silently eating a ~2min
-   Ollama cold-load instead of a normal cloud response will look and feel
-   broken if this isn't caught before the next live session.
+8. ~~Check whether `ANTHROPIC_API_KEY` is still valid~~ — **done session
+   8, key is valid.** A live call through the real `AnthropicBackend`
+   class succeeded cleanly. Session 6's two "failed before first token"
+   incidents are still unexplained, but ruled out as a key problem —
+   hasn't recurred since, not chased further.
