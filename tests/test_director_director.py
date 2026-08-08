@@ -289,6 +289,24 @@ fly:
     assert config.pools["heart"].hotkeys == ["chao.heart", "chao.heart2"]
 
 
+def test_load_emote_config_parses_reactions(tmp_path):
+    config_path = tmp_path / "emotes.yaml"
+    config_path.write_text(
+        """
+pools:
+  curious: { hotkeys: [chao.question], cooldown_s: 3, duration_s: 2.0 }
+
+reactions:
+  anticipation: curious
+  chat_spike: surprise
+"""
+    )
+
+    config = load_emote_config(config_path)
+
+    assert config.reactions == {"anticipation": "curious", "chat_spike": "surprise"}
+
+
 def test_load_emote_config_the_real_file():
     from pathlib import Path
 
@@ -297,3 +315,4 @@ def test_load_emote_config_the_real_file():
 
     for tag_pool in ("happy", "curious", "surprise", "confused", "sad", "angry"):
         assert tag_pool in config.pools
+    assert config.reactions["anticipation"] == "curious"

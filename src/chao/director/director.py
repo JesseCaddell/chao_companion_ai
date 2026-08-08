@@ -63,6 +63,9 @@ class EmotePool:
 @dataclass(frozen=True, slots=True)
 class EmoteConfig:
     pools: dict[str, EmotePool]
+    # reaction name -> pool name, e.g. "anticipation" -> "curious" (§10.4/
+    # §10.5). Director itself doesn't read this — aliveness.py does.
+    reactions: dict[str, str] = field(default_factory=dict)
 
 
 def load_emote_config(path: Path) -> EmoteConfig:
@@ -78,7 +81,8 @@ def load_emote_config(path: Path) -> EmoteConfig:
         )
         for name, raw in (data.get("pools") or {}).items()
     }
-    return EmoteConfig(pools=pools)
+    reactions = {str(k): str(v) for k, v in (data.get("reactions") or {}).items()}
+    return EmoteConfig(pools=pools, reactions=reactions)
 
 
 @dataclass

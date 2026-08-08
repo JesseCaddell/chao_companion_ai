@@ -1,6 +1,7 @@
 import asyncio
 
 from chao.__main__ import build_pipeline
+from chao.director.aliveness import Aliveness
 from chao.director.director import EmoteConfig, EmotePool
 from chao.events import Event, Kind
 
@@ -12,6 +13,28 @@ class FakeBackend:
 
     async def stream(self, system, messages, cancel):
         self.calls.append((system, list(messages)))
+        for c in self.chunks:
+            yield c
+            if cancel.is_set():
+                return
+
+
+class SuspendingFakeBackend:
+    """Like FakeBackend, but genuinely suspends (via a real checkpoint)
+    before its first chunk, instead of yielding every chunk synchronously.
+    Needed to test the anticipation nudge's actual point (design doc
+    §10.5: cover the latency window *before* the first token) -- against
+    plain FakeBackend, an entire turn runs start-to-finish in one
+    uninterrupted task step with no real suspension point, so aliveness_task
+    never gets scheduled until after brain.complete already fired, making
+    "arrives before the first token" untestable.
+    """
+
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+
+    async def stream(self, system, messages, cancel):
+        await asyncio.sleep(0)
         for c in self.chunks:
             yield c
             if cancel.is_set():
@@ -73,3 +96,57 @@ async def test_build_pipeline_fires_emotes_via_director():
         pass
 
     assert emote.payload["pool"] == "happy"
+
+
+async def test_aliveness_fires_anticipation_emote_on_a_real_bus():
+    """Wires Aliveness the same way __main__.py's _run_aliveness does (a
+    plain bus subscriber, no direct coupling to Director/TurnOrchestrator)
+    and confirms the §10.5 anticipation nudge actually reaches the wire on
+    a real Bus -- the same event stream the dashboard's websocket relays
+    verbatim -- *before* the first brain.token. That ordering is the whole
+    point of §10.5 (cover the latency window before any audio/text exists);
+    just checking the emote eventually appears would pass even if it showed
+    up after the reply had already finished streaming.
+    """
+    emote_config = EmoteConfig(
+        pools={
+            "curious": EmotePool(hotkeys=["question.exp3.json"], cooldown_s=3.0, duration_s=2.0)
+        },
+        reactions={"anticipation": "curious"},
+    )
+    backend = SuspendingFakeBackend(["Hi there."])
+    bus, orchestrator = build_pipeline(identity="", emote_config=emote_config, backend=backend)
+    aliveness = Aliveness(emote_config=emote_config, publish=bus.publish)
+
+    sub = bus.subscribe()
+    aliveness_sub = bus.subscribe()
+
+    async def run_aliveness():
+        while True:
+            event = await aliveness_sub.get()
+            aliveness.handle(event)
+
+    orchestrator_task = asyncio.create_task(bus.run(orchestrator))
+    aliveness_task = asyncio.create_task(run_aliveness())
+    bus.publish(Event(kind=Kind.INPUT_MANUAL, payload={"text": "Hi"}))
+
+    kinds_seen: list[str] = []
+    anticipation = None
+    async with asyncio.timeout(1.0):
+        while Kind.BRAIN_COMPLETE not in kinds_seen:
+            event = await sub.get()
+            kinds_seen.append(event.kind)
+            if event.kind == Kind.DIRECTOR_EMOTE:
+                anticipation = event
+
+    for task in (orchestrator_task, aliveness_task):
+        task.cancel()
+    await asyncio.gather(orchestrator_task, aliveness_task, return_exceptions=True)
+
+    assert anticipation is not None
+    assert anticipation.payload == {
+        "pool": "curious",
+        "hotkey_id": "question.exp3.json",
+        "reason": "anticipation",
+    }
+    assert kinds_seen.index(Kind.DIRECTOR_EMOTE) < kinds_seen.index(Kind.BRAIN_TOKEN)

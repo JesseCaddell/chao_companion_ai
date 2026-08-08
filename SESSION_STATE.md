@@ -4,6 +4,102 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
+## Stopping point (end of session 6, 2026-08-08)
+
+Built the first piece of `director/aliveness.py`: the §10.5 anticipation
+nudge (pop the ball's question-mark expression the instant `brain.request`
+fires, before any audio/text exists — covers the 0.5-1.5s latency window
+in-character instead of as dead air). Scope was deliberately narrow, same
+discipline as the dashboard skeleton: the rest of §10 (micro/meso/macro
+idle drift, the attention model) needs continuous parameter injection,
+which per the phase-0 finding requires new custom VTS parameters **bound
+by hand in the VTS UI** before code can drive them — a real user-side
+dependency, not something blocking the code but something blocking
+*verifying* it live. Not started; see next actions below.
+
+`Aliveness` (new, `src/chao/director/aliveness.py`) is a plain bus
+subscriber (`handle(event)`, no async/I/O of its own) — reads
+`emote_config.reactions["anticipation"]` (new `EmoteConfig.reactions:
+dict[str, str]` field, parsed by `load_emote_config`; `config/emotes.yaml`'s
+`reactions:` block already had this exact slot reserved, header comment
+said "not built yet" — now it's built for this one entry) to pick a pool
+(`curious`, i.e. `question.exp3.json`), and fires it via the same
+`director.emote` event `VTSEmoteSubscriber` already knows how to render —
+no new VTS-side plumbing needed. Wired into `__main__.py` as a fourth
+background task, `_run_aliveness`, alongside the error/dashboard/VTS
+tasks.
+
+**Deliberately does not share Director's cooldown state for the `curious`
+pool** — this was the one real design decision here, caught by advisor
+review before writing code: `curious`'s cooldown is 3s, and the
+anticipation nudge fires right as that window opens relative to a
+`[curious]`/`[thinking]` tag in the reply itself, which typically lands
+well inside 3s. Sharing cooldown state would mean the nudge *silently
+suppresses* the LLM's own semantic signal on essentially every turn — no
+error, nothing visibly broken, just a systematically muted tag. Firing
+independently risks the opposite, benign failure mode instead: two
+activations of `question.exp3.json` close together, which
+`VTSEmoteSubscriber._activate` already handles correctly (cancels the
+pending deactivate, extends the hold, rather than a stale deactivate
+cutting the new one short). Documented at length in `aliveness.py`'s
+docstring and pinned by
+`test_does_not_share_cooldown_with_tag_triggered_curious_emotes`.
+
+Two rounds of advisor review happened (before writing code, and after).
+The second round caught a real gap: the first version of the integration
+test only asserted the anticipation emote *eventually* appears on the
+bus — it would have passed identically if the emote arrived after
+`brain.complete`, which defeats the entire point of §10.5 (the nudge only
+matters if it's *early*). Fixed with a `SuspendingFakeBackend` (genuinely
+suspends via `asyncio.sleep(0)` before its first chunk, unlike the
+existing `FakeBackend`, which never yields control to the event loop at
+all — meaning a whole turn can run start-to-finish in one uninterrupted
+task step, starving `aliveness_task` of a chance to run until *after*
+`brain.complete` already fired) plus an explicit ordering assertion
+(`director.emote` index < first `brain.token` index in the observed
+sequence). Verified non-flaky across 5 repeated runs — the FIFO ordering
+of task scheduling favors aliveness resuming before `_run_turn`
+reschedules, so this isn't a timing coin-flip.
+
+**A live end-to-end attempt (real Anthropic call + real dashboard
+websocket + a scripted client, same pattern as session 5's dashboard
+verification) was tried and abandoned, not because anything is broken:**
+the scripted probe connected to the dashboard's websocket ~2s after the
+server published its burst of turn-start events, consistently missing all
+of them (Python + `websockets` cold-import + TCP/HTTP-upgrade overhead ate
+the margin) — and separately, VTS isn't running on this machine right
+now, so even a clean live run couldn't have shown the actual payoff
+(someone seeing the question mark on the model). Advisor's read, which
+matches the evidence: don't retry it, the deterministic integration test
+above plus the already-passing `test_dashboard_server.py` websocket-relay
+tests cover everything a live run would have proven. **Visual
+confirmation in VTS is still outstanding** — added to next actions below,
+not silently dropped.
+
+**Unrelated finding, also not chased down:** both live attempts this
+session logged `"primary backend failed before first token; falling back
+to local"` — the cloud (Anthropic) call failed before any token arrived,
+even with the sandbox disabled for the second attempt. Session 5 made
+real Anthropic calls successfully from this same machine, so this is new,
+not a standing issue. Possibly a rotated/expired `ANTHROPIC_API_KEY`, or
+something else entirely — not investigated, out of scope for this
+session's work (aliveness doesn't depend on the backend call succeeding;
+`brain.request` — and therefore the anticipation nudge — fires
+unconditionally before the backend is ever called). Flagging so it isn't
+rediscovered as a fresh mystery: **if live turns are silently falling back
+to Ollama, check the API key first.**
+
+**Newly relevant, not a code change:** `curious`'s `duration_s: 2.0`
+clears the question-mark expression 2s after it fires. If a turn falls
+back to local (Ollama, ~2 *minutes* cold-load per SESSION_STATE's session
+5 notes), the ball will have already returned to neutral long before the
+reply actually starts streaming. This is correct per CLAUDE.md's "never
+sustain an authored emote beyond ~4s" — flagging it only because item (2)
+above makes local fallback newly likely to actually happen live, not
+because anything needs to change.
+
+104 tests passing (up from 95), ruff clean.
+
 ## Stopping point (end of session 5, 2026-08-07)
 
 The dashboard (design doc §11) exists and is verified working end-to-end,
@@ -760,13 +856,25 @@ is working, but it is not the same as having seen it.
    under ~1s, to catch a screenshot mid-stream — the fold-in logic is
    exercised by every successful turn regardless, so this isn't a real
    gap). The event feed panel is genuinely done, not just wired.
-2. Aliveness — `aliveness.py` is still an empty stub, and it's arguably
-   the single highest-value remaining piece of phase 1. Two things live
-   here: the meso/macro idle-drift layers (CLAUDE.md's `director/aliveness.py`
-   note — 60Hz micro / ~1Hz meso / ~1/min macro, smoothed noise not sine
-   waves), and the §10.5 anticipation nudge specifically — something
-   subscribing to `brain.request` to pop the question-mark ball before
-   audio exists, now that the dashboard exists to actually watch it fire.
+2. ~~Aliveness — the §10.5 anticipation nudge~~ — **done this session**
+   (`Aliveness` in `aliveness.py`, wired into `__main__.py` as
+   `_run_aliveness`). What's left in `aliveness.py`: the meso/macro
+   idle-drift layers (CLAUDE.md's `director/aliveness.py` note — 60Hz
+   micro / ~1Hz meso / ~1/min macro, smoothed noise not sine waves) and
+   the attention model (§10.3). **Blocked on a user-side step, not a code
+   gap:** per the phase-0 finding, driving any of that live requires new
+   custom VTS parameters bound by hand in the VTS UI to real Live2D
+   outputs (the same one-time-per-parameter manual step that made `happy`
+   injectable back in phase 0) — nothing to build in code until that
+   binding exists for whatever parameter(s) idle drift would target
+   (breathing/idle sway position, most likely). **Also outstanding:**
+   visually confirm the anticipation nudge in real VTS — verified this
+   session via a deterministic bus-level integration test (event ordering
+   pinned, non-flaky across 5 runs) and the existing dashboard
+   websocket-relay tests, but VTS wasn't running on this machine this
+   session, so nobody has actually watched the question mark pop live yet.
+   Cheap to close next time VTS is open: run the app, type anything, watch
+   the model.
 3. `neutral` is shelved, not urgent — nothing fires it yet. When it
    resurfaces: either figure out the model's rest-state parameter values
    well enough to author a real `neutral.exp3.json` (may need the
@@ -792,3 +900,11 @@ is working, but it is not the same as having seen it.
    rough edges are known, consider the next panel per §11.2's priority
    order (retrieval trace and mood plot both still need their underlying
    features built first, so realistically this is a phase-6+ concern).
+8. **New this session:** the cloud backend failed before first token on
+   two separate live attempts (see the stopping-point writeup above),
+   something that worked fine in session 5 — check whether
+   `ANTHROPIC_API_KEY` is still valid before assuming it's a real bug.
+   Not urgent in the sense that the circuit breaker degrades gracefully
+   (falls back to local), but every live turn silently eating a ~2min
+   Ollama cold-load instead of a normal cloud response will look and feel
+   broken if this isn't caught before the next live session.

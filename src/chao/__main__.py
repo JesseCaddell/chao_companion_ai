@@ -29,6 +29,7 @@ from chao.brain.local import OllamaBackend
 from chao.brain.turn import TurnOrchestrator
 from chao.bus import Bus
 from chao.dashboard.server import DASHBOARD_HOST, DASHBOARD_PORT, create_app
+from chao.director.aliveness import Aliveness
 from chao.director.director import Director, EmoteConfig, load_emote_config
 from chao.events import Event, Kind
 from chao.outputs.vts import VTSClient, VTSEmoteSubscriber
@@ -108,6 +109,19 @@ async def _run_vts_subscriber(bus: Bus, emote_config: EmoteConfig) -> None:
         await client.close()
 
 
+async def _run_aliveness(bus: Bus, emote_config: EmoteConfig) -> None:
+    """Runs the aliveness layer's anticipation nudge (design doc §10.5) —
+    the only piece of aliveness.py built so far; see its docstring for
+    what's deliberately deferred and why. No I/O of its own (unlike the VTS
+    subscriber), just a bus subscriber loop.
+    """
+    aliveness = Aliveness(emote_config=emote_config, publish=bus.publish)
+    sub = bus.subscribe()
+    while True:
+        event = await sub.get()
+        aliveness.handle(event)
+
+
 async def _read_stdin_into_bus(bus: Bus) -> None:
     loop = asyncio.get_running_loop()
     while True:
@@ -142,6 +156,7 @@ async def main() -> None:
     error_task = asyncio.create_task(_print_errors(bus.subscribe()))
     dashboard_task = asyncio.create_task(_run_dashboard_server(bus))
     vts_task = asyncio.create_task(_run_vts_subscriber(bus, emote_config))
+    aliveness_task = asyncio.create_task(_run_aliveness(bus, emote_config))
     run_task = asyncio.create_task(bus.run(orchestrator))
 
     print(
@@ -162,8 +177,14 @@ async def main() -> None:
         error_task.cancel()
         dashboard_task.cancel()
         vts_task.cancel()
+        aliveness_task.cancel()
         await asyncio.gather(
-            run_task, error_task, dashboard_task, vts_task, return_exceptions=True
+            run_task,
+            error_task,
+            dashboard_task,
+            vts_task,
+            aliveness_task,
+            return_exceptions=True,
         )
 
 
