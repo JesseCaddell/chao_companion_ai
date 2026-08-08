@@ -4,6 +4,76 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
+## Stopping point (end of session 7, 2026-08-08)
+
+Built `director/mood.py` — the valence/arousal half of the aliveness layer
+(design doc §6, §10), user-requested next ("mood.py first, since it drives
+eye expression") after correcting a wrong claim from session 6's writeup:
+**hand-binding VTS parameters was never a prerequisite for writing or
+testing mood/motion logic, only for the final step of driving VTS with
+real injected values.** Per CLAUDE.md's own testing section, mood decay is
+named explicitly as a pure function to test directly, no I/O — same
+category as `director.py`'s cooldown logic, which was built and fully
+tested long before any live VTS check. Corrected in-conversation before
+any code was written; flagging here so the wrong version doesn't get
+re-read as true later.
+
+`Mood` (new, `src/chao/director/mood.py`) is a plain bus subscriber
+(`handle(event)`) that reacts to `director.tag` only: on a recognized tag,
+lazily decays the current valence/arousal point toward baseline based on
+elapsed time since the last update (`decay()`, a pure exponential
+half-life function — tested directly: `elapsed=0` is identity, one
+half-life lands exactly halfway, monotone convergence, zero-half-life is a
+no-op), then applies that tag's §6.2 delta on top, clamped to [-1, 1], and
+publishes `director.mood` (new bus contract — payload
+`{valence, arousal, baseline_valence, baseline_arousal}`; nothing consumes
+it yet besides the dashboard's generic event-feed relay). Wired into
+`__main__.py` as a fifth background task, `_run_mood`, same shape as
+`_run_aliveness`.
+
+**Real design decision, caught by advisor before writing code:** the delta
+table (`_TAG_DELTAS`) is keyed on the **tag**, never the emote pool.
+`director.py`'s `_TAG_TO_POOL` maps both `happy` and `affection` to the
+same `"happy"` pool, but §6.2 gives them different valence/arousal deltas
+(+0.7/+0.6 vs +0.9/+0.3) — keying on pool would silently give `affection`
+happy's numbers. `thinking` is deliberately **absent** from the table
+(§6.2 marks it "transient only"), not present with zero deltas — an absent
+key correctly no-ops (no decay side-effect, no `director.mood` publish),
+which matters because `Director` already fires `thinking`'s emote via the
+`curious` pool, so a mood entry would have double-counted a signal that
+design doc's table says shouldn't move mood at all. `pause` and
+`look:chat`/`look:you` fall through the same lookup miss, no special-casing
+needed, since `_tag_key()` renders them as strings the table just doesn't
+contain.
+
+**Config:** added a `mood:` block to `config/emotes.yaml` (`baseline_valence:
+0.2`, `baseline_arousal: 0.3`, `half_life_s: 20.0`) rather than starting
+the empty `config/chao.yaml` from scratch — `emotes.yaml`'s own header
+comment already parked `fly:`/`heart_gate:` there as belonging to
+aliveness.py/mood.py, the strongest existing signal for where this
+belongs. **The two baseline numbers are explicit tuning placeholders, not
+settled values** — flagged in the YAML comment that `baseline_arousal`
+specifically will later set how often the chao rests near flying-eligible
+once `aliveness.py` reads it for §6.4's fly hysteresis (`on_above: 0.70`).
+
+**Deliberately not built this pass** (mirrors aliveness.py's own scoping
+precedent): no periodic tick — decay is lazy, computed only when a tag
+arrives, since nothing in the codebase runs a timer loop yet; `aliveness.py`
+owns the micro/meso/macro timescales (§10.1) and will call a future
+`Mood.tick(now)` once that loop exists. Fly's hysteresis (§6.4) and heart
+gating (§6.3, needs per-viewer affinity from memory, phase 6) are
+untouched — both already have config parked in `emotes.yaml` and stay
+aliveness.py's/phase-6's job respectively. No VTS wiring at all yet:
+`director.mood` isn't consumed by any subscriber besides the dashboard's
+generic relay, so the actual hand-binding step (pick target Live2D
+parameters, `ParameterCreationRequest`, bind in VTS UI, verify via
+`vts_probe.py`'s proven procedure) is still real future work — just
+correctly scoped now to "wire mood's output into VTS," not "everything
+mood-related."
+
+18 new tests (`tests/test_director_mood.py`), 122 total passing (up from
+104), ruff clean.
+
 ## Stopping point (end of session 6, 2026-08-08)
 
 Built the first piece of `director/aliveness.py`: the §10.5 anticipation
@@ -856,25 +926,37 @@ is working, but it is not the same as having seen it.
    under ~1s, to catch a screenshot mid-stream — the fold-in logic is
    exercised by every successful turn regardless, so this isn't a real
    gap). The event feed panel is genuinely done, not just wired.
-2. ~~Aliveness — the §10.5 anticipation nudge~~ — **done this session**
+2. ~~Aliveness — the §10.5 anticipation nudge~~ — **done session 6**
    (`Aliveness` in `aliveness.py`, wired into `__main__.py` as
-   `_run_aliveness`). What's left in `aliveness.py`: the meso/macro
-   idle-drift layers (CLAUDE.md's `director/aliveness.py` note — 60Hz
-   micro / ~1Hz meso / ~1/min macro, smoothed noise not sine waves) and
-   the attention model (§10.3). **Blocked on a user-side step, not a code
-   gap:** per the phase-0 finding, driving any of that live requires new
-   custom VTS parameters bound by hand in the VTS UI to real Live2D
-   outputs (the same one-time-per-parameter manual step that made `happy`
-   injectable back in phase 0) — nothing to build in code until that
-   binding exists for whatever parameter(s) idle drift would target
-   (breathing/idle sway position, most likely). **Also outstanding:**
-   visually confirm the anticipation nudge in real VTS — verified this
-   session via a deterministic bus-level integration test (event ordering
-   pinned, non-flaky across 5 runs) and the existing dashboard
-   websocket-relay tests, but VTS wasn't running on this machine this
-   session, so nobody has actually watched the question mark pop live yet.
-   Cheap to close next time VTS is open: run the app, type anything, watch
-   the model.
+   `_run_aliveness`). ~~`mood.py` — valence/arousal state~~ — **done
+   session 7** (`Mood`, tag-keyed deltas, lazy decay, wired as `_run_mood`;
+   see that session's stopping-point writeup for the corrected claim about
+   what hand-binding actually blocks). What's left, in order:
+   - `motion.py` — the design doc's other idle-drift half (ball spring is
+     already native to the rig per CLAUDE.md, so this is really just idle
+     sway/breathing/attention-driven head motion at this point). Not
+     started.
+   - The micro/meso/macro timescale loop itself (§10.1: 60Hz/~1Hz/~1min) —
+     currently nothing calls `Mood.tick()` or drives idle drift
+     periodically; both `Mood` and `Aliveness` are purely event-reactive
+     right now. This is `aliveness.py`'s job once `motion.py` exists to
+     drive.
+   - The attention model (§10.3).
+   - **Then, and only then, hand-binding becomes relevant:** once
+     `motion.py`/the timescale loop decide which Live2D parameters idle
+     drift actually wants to drive, create+bind those specific custom VTS
+     parameters (same one-time-per-parameter manual step that made `happy`
+     injectable in phase 0) and wire a `director.mood`/idle-drift
+     subscriber in `outputs/vts.py` to inject them. Binding before the
+     design says what it needs risks binding the wrong things — hold off
+     until there's a concrete target list.
+   - **Also outstanding:** visually confirm the anticipation nudge in real
+     VTS — verified via a deterministic bus-level integration test (event
+     ordering pinned, non-flaky across 5 runs) and the existing dashboard
+     websocket-relay tests, but VTS wasn't running on this machine either
+     session, so nobody has actually watched the question mark pop live
+     yet. Cheap to close next time VTS is open: run the app, type
+     anything, watch the model.
 3. `neutral` is shelved, not urgent — nothing fires it yet. When it
    resurfaces: either figure out the model's rest-state parameter values
    well enough to author a real `neutral.exp3.json` (may need the

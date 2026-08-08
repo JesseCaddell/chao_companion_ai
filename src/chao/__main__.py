@@ -31,6 +31,7 @@ from chao.bus import Bus
 from chao.dashboard.server import DASHBOARD_HOST, DASHBOARD_PORT, create_app
 from chao.director.aliveness import Aliveness
 from chao.director.director import Director, EmoteConfig, load_emote_config
+from chao.director.mood import Mood, MoodConfig, load_mood_config
 from chao.events import Event, Kind
 from chao.outputs.vts import VTSClient, VTSEmoteSubscriber
 
@@ -122,6 +123,18 @@ async def _run_aliveness(bus: Bus, emote_config: EmoteConfig) -> None:
         aliveness.handle(event)
 
 
+async def _run_mood(bus: Bus, mood_config: MoodConfig) -> None:
+    """Runs mood.py's tag-driven valence/arousal tracking (design doc §6,
+    §10). No periodic tick yet -- see mood.py's docstring for why; this is
+    just a bus subscriber loop, same shape as `_run_aliveness`.
+    """
+    mood = Mood(config=mood_config, publish=bus.publish)
+    sub = bus.subscribe()
+    while True:
+        event = await sub.get()
+        mood.handle(event)
+
+
 async def _read_stdin_into_bus(bus: Bus) -> None:
     loop = asyncio.get_running_loop()
     while True:
@@ -144,6 +157,7 @@ async def main() -> None:
 
     identity = IDENTITY_PATH.read_text() if IDENTITY_PATH.exists() else ""
     emote_config = load_emote_config(EMOTES_PATH)
+    mood_config = load_mood_config(EMOTES_PATH)
 
     cloud = AnthropicBackend()  # reads ANTHROPIC_API_KEY from the environment
     local = OllamaBackend(os.environ.get("CHAO_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL))
@@ -157,6 +171,7 @@ async def main() -> None:
     dashboard_task = asyncio.create_task(_run_dashboard_server(bus))
     vts_task = asyncio.create_task(_run_vts_subscriber(bus, emote_config))
     aliveness_task = asyncio.create_task(_run_aliveness(bus, emote_config))
+    mood_task = asyncio.create_task(_run_mood(bus, mood_config))
     run_task = asyncio.create_task(bus.run(orchestrator))
 
     print(
@@ -178,12 +193,14 @@ async def main() -> None:
         dashboard_task.cancel()
         vts_task.cancel()
         aliveness_task.cancel()
+        mood_task.cancel()
         await asyncio.gather(
             run_task,
             error_task,
             dashboard_task,
             vts_task,
             aliveness_task,
+            mood_task,
             return_exceptions=True,
         )
 

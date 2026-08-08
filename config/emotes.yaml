@@ -15,9 +15,10 @@
 # safe for now. Once a default-state expression is authored in VTS, fill
 # in its file name here.
 #
-# director.py reads `pools`. `fly` and `heart_gate` belong to
-# aliveness.py/mood.py (not built yet, except the "anticipation" reaction
-# below). `reactions` maps a non-verbal-only trigger (§10.4) to a pool;
+# director.py reads `pools`. `mood` is read by mood.py's load_mood_config.
+# `fly` and `heart_gate` still belong to aliveness.py (fly) and mood.py
+# (heart_gate, affinity-gated per §6.3, needs memory -- phase 6) and aren't
+# built yet. `reactions` maps a non-verbal-only trigger (§10.4) to a pool;
 # aliveness.py's Aliveness.handle reads `reactions.anticipation` to drive
 # the §10.5 anticipation nudge (question mark on brain.request, before any
 # audio exists) — the only reaction wired up so far. The rest of this
@@ -42,6 +43,14 @@ fly:
 heart_gate:
   affinity_threshold: 0.4
   valence_threshold: 0.5
+
+mood:                    # §6, §10 -- mood.py's valence/arousal resting point + decay rate.
+  baseline_valence: 0.2    # tuning placeholder: generally cheerful resting point, not yet
+  baseline_arousal: 0.3    # reflection-driven (§7's long-term baseline drift is phase 7).
+                            # NOTE: this arousal value is what `fly`'s hysteresis above (on
+                            # >0.70) decays back toward once aliveness.py reads it -- raising
+                            # it means more time spent flying at rest, not just during spikes.
+  half_life_s: 20.0        # seconds for a mood nudge to decay halfway back to baseline
 
 reactions:            # non-verbal only, no LLM call
   anticipation:   curious   # §10.5 — wired up, see aliveness.py
