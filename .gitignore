@@ -7,5 +7,7 @@ __pycache__/
 data/chao.db
 data/sessions/*.jsonl
 data/vts_token.txt
+data/voices/*.onnx
+data/voices/*.onnx.json
 src/chao/dashboard/web/node_modules/
 src/chao/dashboard/web/dist/

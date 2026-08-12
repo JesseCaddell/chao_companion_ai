@@ -1015,6 +1015,45 @@ confirmed the rendered UI actually looks right inside the window. Process
 health plus a confirmed-correct HTTP response is real evidence something
 is working, but it is not the same as having seen it.
 
+## Stopping point (session 9, 2026-08-11)
+
+Picked up session 8's TTS thread: Piper is now actually installed, not just
+chosen.
+
+- **`piper-tts` added as a project dependency** (`uv add piper-tts`) — pulls
+  in `onnxruntime` CPU-only (no CUDA extras), consistent with invariant 1.
+- **Voice: `en_US-amy-medium`**, the user's explicit placeholder pick.
+  Downloaded via `python -m piper.download_voices` into `data/voices/`
+  (`.onnx` + `.onnx.json`, ~63MB). Gitignored (`data/voices/*.onnx*`) —
+  same treatment as `chao.db`/`vts_token.txt`: large, regenerable, not
+  source. User is separately compiling/preparing a custom childlike voice
+  in parallel (referenced a `shift_voice.py` tool outside this repo); that
+  slots in later as a config-only swap, per session 8's plan.
+- **`src/chao/outputs/tts.py` (new)** — `PiperBackend`, following the same
+  injectable-client shape as `AnthropicBackend`/`OllamaBackend` so tests
+  don't need a real model loaded. `synthesize(text)` is an async generator
+  yielding one `AudioChunk` (mono float32 PCM + sample rate) per sentence —
+  Piper's own `PiperVoice.synthesize` already sentence-splits, so no
+  splitting logic needed here. The actual `onnxruntime` inference call is
+  blocking/CPU-bound, so it's run via `loop.run_in_executor`, not awaited
+  directly — keeps the rest of the bus (VTS, dashboard, aliveness) live
+  while a sentence renders. 4 new tests (fake voice, no real Piper
+  load), all passing; full suite at 126 passed, ruff clean.
+- **Verified for real, not just unit-tested:** ran `PiperBackend.synthesize`
+  against the actual downloaded `en_US-amy-medium` model end-to-end (a
+  three-sentence string), got back three real audio chunks at 22050Hz —
+  confirms the async/executor wrapping and the `AudioChunk` shape both work
+  against genuine Piper output, not just the fake.
+- **Deliberately not done yet:** `tts.py` is not wired into `turn.py` or
+  `__main__.py`. Nothing calls `PiperBackend` from the live pipeline, no
+  `output.speech_start`/`end` events are published, and there's no
+  `outputs/audio.py` yet for virtual-cable playback. That's real pipeline
+  wiring (turn.py's cancellation-critical path, per invariant 5) and a
+  bigger, separate step — this session only unblocks it by giving
+  `motion.py`'s §8.1 envelope extraction a real, concrete `AudioChunk`
+  shape to consume, which was the actual point of doing Piper now rather
+  than later.
+
 ## Next actions
 
 1. ~~Visually confirm the dashboard actually renders correctly~~ — **done,
@@ -1083,13 +1122,16 @@ is working, but it is not the same as having seen it.
    priority, quick, not expected to change any conclusion).
 6. Phase 2 kickoff: ~~pick a TTS model~~ — **done session 8, Piper**
    (confirmed, not changed — the only CPU/zero-VRAM option at the doc's
-   200ms latency budget). Voice selection itself is still open: user wants
-   a childlike voice and is willing to pay for one, but wants to start
-   with any free default Piper voice so pipeline work isn't gated on
-   finding it first — pick a placeholder voice file when actually
-   installing Piper, revisit later, revisit means a config change only.
-   Subtitle overlay + personality/voice test segment (§18) still not
-   started.
+   200ms latency budget). ~~Install Piper + pick a placeholder voice~~ —
+   **done session 9** (`piper-tts` installed, `en_US-amy-medium`
+   downloaded to `data/voices/`, `outputs/tts.py`'s `PiperBackend` built
+   and verified against the real model). Still open: the childlike paid
+   voice (user preparing one separately, config swap later), and wiring
+   `tts.py` into the live turn pipeline (`turn.py`, `output.speech_*`
+   events, a real `outputs/audio.py` for virtual-cable playback) — not
+   started, deliberately deferred since `motion.py` only needed the
+   `AudioChunk` interface to exist, not a live pipeline. Subtitle overlay +
+   personality/voice test segment (§18) still not started.
 7. Once the dashboard's event feed panel has been used for a bit and its
    rough edges are known, consider the next panel per §11.2's priority
    order (retrieval trace and mood plot both still need their underlying
