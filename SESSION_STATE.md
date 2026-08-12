@@ -1054,6 +1054,78 @@ chosen.
   shape to consume, which was the actual point of doing Piper now rather
   than later.
 
+### Session 9, part 2: the fly state machine + horizontal screen positioning
+
+User redirected `motion.py` scope before it was built: breathing is VTS-
+native (confirmed by the user), idle sway is low priority, and the real
+ask was **the chao deciding to fly to different horizontal positions on
+screen**. Consulted the `advisor` tool before designing (per CLAUDE.md's
+"changing the Event schema" escalation trigger) — its guidance shaped
+everything below, in particular "probe `MoveModelRequest` before designing
+around it," which resolved the single biggest open question.
+
+- **Live probe result (the architectural fork):** `MoveModelRequest`
+  genuinely **interpolates** over `timeInSeconds` — does not snap. Raw
+  `CurrentModelRequest` samples mid-move showed positionX moving from
+  baseline (~-0.026) through -0.24 (t=0.5s) and -0.36 (t=1.0s) to -0.40
+  (t=2.2s, settled), for a request targeting -0.4 over 2.0s. This means
+  "fly to a new spot" is **one API call per destination** — no 60Hz tween
+  loop, no `motion.py` needed for this feature at all.
+- **`aliveness.py`: `Fly` (new)** — §6.4's on/off hysteresis state machine,
+  pure and `FakeClock`-testable like `mood.py`. Driven by `director.mood`
+  (arousal, for on_above/off_below) and `director.tag` (an unconditional
+  "land on `[sad]`" hard rule that bypasses both the threshold and
+  `min_dwell_s`). While already flying, a `director.mood` arrival that
+  doesn't trigger landing is also the (rate-limited via `min_reposition_s`)
+  trigger to consider a new horizontal target — reuses an existing,
+  activity-tied signal instead of a periodic timer, per §10.2's "noise not
+  pacing" spirit. Publishes `state.fly` (§13's existing kind, no schema
+  change — just an added `target_x` field: the new x when `flying`, `None`
+  when landing, read by the VTS side as "return to rest").
+  - **Known, documented limitation:** no periodic tick, same as `Mood`.
+    `director.mood` only fires when a tag nudges mood, so in a genuinely
+    quiet stretch a flying chao won't re-evaluate arousal and won't land
+    on its own. Needs §10.1's timescale loop to fully close — a separate,
+    larger piece of work, not attempted this session.
+- **`outputs/vts.py`: `VTSFlySubscriber` (new)** — turns `state.fly` into
+  a `MoveModelRequest` (positionX from the event, Y/rotation/size held at
+  a baseline captured once via `CurrentModelRequest` on first use) plus an
+  `ExpressionActivationRequest` toggle for the `fly` visual itself. Unlike
+  `VTSEmoteSubscriber`'s pool emotes, the fly expression is a **sustained**
+  toggle with no auto-deactivate timer — §6.1 lists `fly` as its own
+  `state` channel, not a transient eyes/ball emote, so CLAUDE.md's "never
+  sustain an authored emote beyond ~4s" doesn't apply to it. Shares the
+  existing VTS websocket connection with `VTSEmoteSubscriber` rather than
+  opening a second one — both now live inside `_run_vts_subscriber`.
+- **`config/emotes.yaml`'s `fly:` block extended:** `x_range: [-0.4, 0.4]`
+  (conservative placeholder — -0.4 confirmed reachable and glided
+  correctly, but the exact visible window edges haven't been checked by
+  eye against the real OBS-capture framing), `move_duration_s: 2.0`,
+  `land_duration_s: 1.5`, `min_reposition_s: 8.0`.
+- **Verified live, twice:** the `MoveModelRequest` probe itself (raw API
+  numbers only), then a second, separate live check running the actual
+  `Fly`/`VTSFlySubscriber` classes end-to-end (synthetic `director.mood`
+  events standing in for the LLM emitting real tags) against the running
+  VTS instance. User confirmed: **glided smoothly both ways** (no
+  snapping) and **the ball trailed during the move** — the rig's §8.2
+  physics group reacting to root model movement exactly like it already
+  does to head movement, with no extra code. Did not get explicit
+  confirmation either way on the `fly` expression's visual (wings or
+  similar) — worth a specific look next time VTS is open.
+- 21 new tests (`Fly`/`FlyConfig`/`load_fly_config` in
+  `test_director_aliveness.py`, `VTSFlySubscriber` in `test_outputs_vts.py`),
+  full suite at 147 passed, ruff clean.
+- **Design doc updated:** §6.4 gets a session-9 update block documenting
+  the interpolation finding and the known landing-in-quiet-stretches gap.
+  §10.1's micro-timescale row also corrected — breathing and the ball
+  spring are both native to VTS/the rig, not this layer's job; blink
+  timing is left as still-owned pending a check.
+- **Not done / still open:** exact `x_range` bounds vs. the real visible
+  window (needs a by-eye check, not just "didn't error"); whether VTS
+  persists a moved position across a restart if the process dies mid-
+  flight instead of landing cleanly first (low risk, not tested); the
+  timescale loop that would let landing happen without a subsequent tag.
+
 ## Next actions
 
 1. ~~Visually confirm the dashboard actually renders correctly~~ — **done,
@@ -1076,25 +1148,32 @@ chosen.
    `_run_aliveness`). ~~`mood.py` — valence/arousal state~~ — **done
    session 7** (`Mood`, tag-keyed deltas, lazy decay, wired as `_run_mood`;
    see that session's stopping-point writeup for the corrected claim about
-   what hand-binding actually blocks). What's left, in order:
-   - `motion.py` — the design doc's other idle-drift half (ball spring is
-     already native to the rig per CLAUDE.md, so this is really just idle
-     sway/breathing/attention-driven head motion at this point). Not
-     started.
+   what hand-binding actually blocks). ~~§6.4's fly state machine +
+   horizontal screen positioning~~ — **done session 9** (`Fly` in
+   `aliveness.py`, `VTSFlySubscriber` in `outputs/vts.py`, wired as
+   `_run_fly`; see session 9 part 2's writeup — live-verified, glides
+   smoothly, ball trails correctly). What's left, in order:
    - The micro/meso/macro timescale loop itself (§10.1: 60Hz/~1Hz/~1min) —
-     currently nothing calls `Mood.tick()` or drives idle drift
-     periodically; both `Mood` and `Aliveness` are purely event-reactive
-     right now. This is `aliveness.py`'s job once `motion.py` exists to
-     drive.
+     currently nothing calls `Mood.tick()` or re-evaluates `Fly`'s
+     hysteresis periodically; `Mood`, `Aliveness`, and `Fly` are all purely
+     event-reactive right now. Concretely blocks: `Fly` landing on its own
+     during a quiet stretch (no tags arriving), and any true idle
+     drift/breathing-adjacent behavior (though note breathing/blink turned
+     out to be VTS-native per session 9's design doc correction — the
+     remaining case for this loop is mood re-decay and fly's hysteresis,
+     not idle animation).
    - The attention model (§10.3).
-   - **Then, and only then, hand-binding becomes relevant:** once
-     `motion.py`/the timescale loop decide which Live2D parameters idle
-     drift actually wants to drive, create+bind those specific custom VTS
-     parameters (same one-time-per-parameter manual step that made `happy`
-     injectable in phase 0) and wire a `director.mood`/idle-drift
-     subscriber in `outputs/vts.py` to inject them. Binding before the
-     design says what it needs risks binding the wrong things — hold off
-     until there's a concrete target list.
+   - `motion.py` itself may not be needed at all: session 9's
+     `MoveModelRequest` probe found VTS interpolates natively, so the
+     "chao moves around" feature didn't need a code-side tween loop. If a
+     future idle-drift need turns out to require continuous Live2D
+     parameter injection (not a discrete API call like `MoveModelRequest`),
+     motion.py becomes relevant then — not before.
+   - **Hand-binding is still gated on a concrete target list:** it was
+     NOT needed for horizontal flying (that uses `MoveModelRequest`, a
+     direct API call, not a bound parameter) — that blocker only applies
+     to whatever the timescale loop above ends up wanting to drive via
+     continuous injection. Don't bind speculatively.
    - ~~Visually confirm the anticipation nudge in real VTS~~ — **done
      session 8.** Found a real bug in the process: `_run_vts_subscriber`
      subscribed to the bus *after* the VTS connect/authenticate round trip,

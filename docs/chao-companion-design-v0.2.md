@@ -318,6 +318,8 @@ if     flying and arousal < 0.40: fly_off()
 
 Additional hard rules: land on `[sad]` regardless of arousal, land during the sleepy/low-energy macro state (§10.6), and enforce a minimum 5s dwell in either state.
 
+**Update (session 9): flying now also moves horizontally.** While flying, the chao periodically picks a new x position on screen and glides there — implemented via `MoveModelRequest`, not a bound Live2D parameter. A live probe confirmed this call genuinely interpolates over `timeInSeconds` (positionX measured mid-move at a partial value, not snapping to the target), so no code-side tween loop is needed — one API call per destination is the whole mechanism. Also confirmed live: the ball's rig-native physics group reacts to the model's root position moving, the same lag behavior already documented in §8.2, so the ball visibly trails during a horizontal move with no extra code. Repositioning is deliberately sparse and tied to existing activity signals (a `min_reposition_s` floor between repositions, only considered when a `director.mood` event already arrived for another reason) rather than a periodic timer — see §10.2. Implemented in `aliveness.py`'s `Fly`; `outputs/vts.py`'s `VTSFlySubscriber` issues the `MoveModelRequest`/`ExpressionActivationRequest` calls. Known gap: the on/off hysteresis only re-evaluates arousal when a `director.mood` event arrives (itself only published when a tag nudges mood), so a flying chao will not land on its own during a genuinely quiet stretch — needs §10.1's timescale loop to fully close.
+
 ### 6.5 Recommended additions
 
 You noted more can be mapped. In priority order:
@@ -442,9 +444,11 @@ The system that makes the chao feel alive, running **independently of the LLM**.
 
 | Timescale | Rate | Behaviours |
 |---|---|---|
-| **Micro** | 60 Hz | Breathing, idle drift, ball spring, blink timing |
+| **Micro** | 60 Hz | Idle drift, blink timing |
 | **Meso** | ~1 Hz | Weight shifts, attention changes, small reactive emotes |
 | **Macro** | ~1/min | Mood baseline drift, boredom, energy decay, fly state |
+
+**Update (session 9):** breathing and the ball spring both turned out to be native to VTS/the rig, not code this layer drives — same pattern as §8.2's ball-lag finding. Breathing is VTS's own idle animation; confirmed by the user, not independently re-verified against the live model this session. Blink timing has not been checked either way and is left here as still-owned by this layer until confirmed otherwise.
 
 ### 10.2 Noise, not sine waves
 

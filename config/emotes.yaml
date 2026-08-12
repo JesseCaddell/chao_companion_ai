@@ -16,13 +16,14 @@
 # in its file name here.
 #
 # director.py reads `pools`. `mood` is read by mood.py's load_mood_config.
-# `fly` and `heart_gate` still belong to aliveness.py (fly) and mood.py
-# (heart_gate, affinity-gated per §6.3, needs memory -- phase 6) and aren't
-# built yet. `reactions` maps a non-verbal-only trigger (§10.4) to a pool;
-# aliveness.py's Aliveness.handle reads `reactions.anticipation` to drive
-# the §10.5 anticipation nudge (question mark on brain.request, before any
-# audio exists) — the only reaction wired up so far. The rest of this
-# block is still aspirational.
+# `fly` is read by aliveness.py's load_fly_config (session 9 -- the §6.4
+# state machine plus horizontal screen positioning). `heart_gate` still
+# belongs to mood.py (affinity-gated per §6.3, needs memory -- phase 6) and
+# isn't built yet. `reactions` maps a non-verbal-only trigger (§10.4) to a
+# pool; aliveness.py's Aliveness.handle reads `reactions.anticipation` to
+# drive the §10.5 anticipation nudge (question mark on brain.request,
+# before any audio exists) — the only reaction wired up so far. The rest of
+# this block is still aspirational.
 
 pools:
   happy:      { hotkeys: [happy.exp3.json], cooldown_s: 4, duration_s: 2.5 }
@@ -39,6 +40,17 @@ fly:
   on_above: 0.70
   off_below: 0.40
   min_dwell_s: 5
+  x_range: [-0.4, 0.4]      # MoveModelRequest positionX bounds (§6.4 horizontal
+                             # flying, session 9). -0.4 confirmed reachable live via
+                             # a MoveModelRequest probe -- it genuinely interpolates
+                             # (not a snap), positionX went baseline ~-0.03 -> -0.4
+                             # smoothly over the requested timeInSeconds. Exact
+                             # visible window edges NOT yet confirmed by eye --
+                             # this range is a conservative placeholder pending
+                             # that visual check. Tune once confirmed.
+  move_duration_s: 2.0      # timeInSeconds per MoveModelRequest while repositioning
+  land_duration_s: 1.5      # shorter glide back to resting X when landing
+  min_reposition_s: 8.0     # minimum gap between horizontal repositions while flying
 
 heart_gate:
   affinity_threshold: 0.4

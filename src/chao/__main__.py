@@ -29,11 +29,11 @@ from chao.brain.local import OllamaBackend
 from chao.brain.turn import TurnOrchestrator
 from chao.bus import Bus
 from chao.dashboard.server import DASHBOARD_HOST, DASHBOARD_PORT, create_app
-from chao.director.aliveness import Aliveness
+from chao.director.aliveness import Aliveness, Fly, FlyConfig, load_fly_config
 from chao.director.director import Director, EmoteConfig, load_emote_config
 from chao.director.mood import Mood, MoodConfig, load_mood_config
 from chao.events import Event, Kind
-from chao.outputs.vts import VTSClient, VTSEmoteSubscriber
+from chao.outputs.vts import VTSClient, VTSEmoteSubscriber, VTSFlySubscriber
 
 CONFIG_DIR = Path("config")
 IDENTITY_PATH = CONFIG_DIR / "identity.md"
@@ -86,11 +86,13 @@ async def _run_dashboard_server(bus: Bus) -> None:
     await server.serve()
 
 
-async def _run_vts_subscriber(bus: Bus, emote_config: EmoteConfig) -> None:
-    """Connects to VTS and turns `director.emote` events into real
-    ExpressionActivationRequest calls. Degrades gracefully, not fatally, if
-    VTS isn't running or rejects auth — the chat loop is still useful
-    without it, it just won't show anything on the model.
+async def _run_vts_subscriber(bus: Bus, emote_config: EmoteConfig, fly_config: FlyConfig) -> None:
+    """Connects to VTS and turns `director.emote`/`state.fly` events into
+    real VTS API calls, over the one shared connection (both subscribers
+    dispatch off the same event stream and no-op on kinds they don't own).
+    Degrades gracefully, not fatally, if VTS isn't running or rejects
+    auth — the chat loop is still useful without it, it just won't show
+    anything on the model.
 
     Subscribes to the bus *before* the connect/authenticate round trip, not
     after. `Bus.subscribe()` has no replay for late subscribers -- with the
@@ -113,11 +115,15 @@ async def _run_vts_subscriber(bus: Bus, emote_config: EmoteConfig) -> None:
         print(f"  (VTS unavailable, emotes won't display: {e})")
         return
 
-    subscriber = VTSEmoteSubscriber(client=client, emote_config=emote_config, publish=bus.publish)
+    emote_subscriber = VTSEmoteSubscriber(
+        client=client, emote_config=emote_config, publish=bus.publish
+    )
+    fly_subscriber = VTSFlySubscriber(client=client, fly_config=fly_config, publish=bus.publish)
     try:
         while True:
             event = await sub.get()
-            await subscriber.handle(event)
+            await emote_subscriber.handle(event)
+            await fly_subscriber.handle(event)
     finally:
         await client.close()
 
@@ -147,6 +153,19 @@ async def _run_mood(bus: Bus, mood_config: MoodConfig) -> None:
         mood.handle(event)
 
 
+async def _run_fly(bus: Bus, fly_config: FlyConfig) -> None:
+    """Runs aliveness.py's Fly state machine (design doc §6.4, session 9's
+    horizontal-positioning addition). Same bus-subscriber shape as
+    `_run_aliveness`/`_run_mood` -- independent of both, reacting to the
+    `director.mood`/`director.tag` events those publish.
+    """
+    fly = Fly(config=fly_config, publish=bus.publish)
+    sub = bus.subscribe()
+    while True:
+        event = await sub.get()
+        fly.handle(event)
+
+
 async def _read_stdin_into_bus(bus: Bus) -> None:
     loop = asyncio.get_running_loop()
     while True:
@@ -170,6 +189,7 @@ async def main() -> None:
     identity = IDENTITY_PATH.read_text() if IDENTITY_PATH.exists() else ""
     emote_config = load_emote_config(EMOTES_PATH)
     mood_config = load_mood_config(EMOTES_PATH)
+    fly_config = load_fly_config(EMOTES_PATH)
 
     cloud = AnthropicBackend()  # reads ANTHROPIC_API_KEY from the environment
     local = OllamaBackend(os.environ.get("CHAO_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL))
@@ -181,9 +201,10 @@ async def main() -> None:
 
     error_task = asyncio.create_task(_print_errors(bus.subscribe()))
     dashboard_task = asyncio.create_task(_run_dashboard_server(bus))
-    vts_task = asyncio.create_task(_run_vts_subscriber(bus, emote_config))
+    vts_task = asyncio.create_task(_run_vts_subscriber(bus, emote_config, fly_config))
     aliveness_task = asyncio.create_task(_run_aliveness(bus, emote_config))
     mood_task = asyncio.create_task(_run_mood(bus, mood_config))
+    fly_task = asyncio.create_task(_run_fly(bus, fly_config))
     run_task = asyncio.create_task(bus.run(orchestrator))
 
     print(
@@ -206,6 +227,7 @@ async def main() -> None:
         vts_task.cancel()
         aliveness_task.cancel()
         mood_task.cancel()
+        fly_task.cancel()
         await asyncio.gather(
             run_task,
             error_task,
@@ -213,6 +235,7 @@ async def main() -> None:
             vts_task,
             aliveness_task,
             mood_task,
+            fly_task,
             return_exceptions=True,
         )
 

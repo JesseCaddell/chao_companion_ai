@@ -17,6 +17,7 @@ from typing import Protocol
 
 import websockets
 
+from chao.director.aliveness import FlyConfig
 from chao.director.director import EmoteConfig
 from chao.events import Event, Kind
 
@@ -189,3 +190,108 @@ class VTSEmoteSubscriber:
             )
             return False
         return True
+
+
+@dataclass
+class VTSFlySubscriber:
+    """Turns `state.fly` events into `MoveModelRequest` calls (horizontal
+    screen positioning, session 9) plus an `ExpressionActivationRequest`
+    toggle for the `fly` visual itself.
+
+    A live probe (SESSION_STATE.md session 9) confirmed `MoveModelRequest`
+    interpolates smoothly over `timeInSeconds` rather than snapping — so
+    this is genuinely "send one request per destination," no tween loop,
+    no motion.py involved.
+
+    The `fly` expression is handled differently from `VTSEmoteSubscriber`'s
+    pool emotes: it's a sustained toggle (§6.1 lists it as its own `state`
+    channel, not a transient eyes/ball emote), so it's activated with no
+    scheduled auto-deactivation and only turned off when `flying` goes
+    False — CLAUDE.md's "never sustain an authored emote beyond ~4s" is
+    about the transient pool emotes, not this persistent state toggle.
+
+    Caches the model's baseline position (Y/rotation/size, and the resting
+    X) from a single `CurrentModelRequest` the first time a `state.fly`
+    event arrives — not at construction, so a client that hasn't connected
+    yet (or a model that hasn't loaded) doesn't fail subscriber setup, only
+    the first fly transition. `MoveModelRequest` takes the full position,
+    not a delta, so Y/rotation/size are re-sent unchanged on every move.
+    """
+
+    client: VTSTransport
+    fly_config: FlyConfig
+    publish: Callable[[Event], None] = _default_publish
+
+    _baseline: dict | None = field(default=None, init=False)
+
+    async def handle(self, event: Event) -> None:
+        if event.kind != Kind.STATE_FLY:
+            return
+
+        flying = bool(event.payload.get("flying"))
+        target_x = event.payload.get("target_x")
+        await self._move(flying=flying, target_x=target_x)
+        await self._toggle_expression(active=flying)
+
+    async def _move(self, *, flying: bool, target_x: float | None) -> None:
+        baseline = await self._ensure_baseline()
+        if baseline is None:
+            return
+
+        position_x = target_x if (flying and target_x is not None) else baseline["positionX"]
+        duration = self.fly_config.move_duration_s if flying else self.fly_config.land_duration_s
+
+        try:
+            await self.client.request(
+                "MoveModelRequest",
+                {
+                    "timeInSeconds": duration,
+                    "valuesAreRelativeToModel": False,
+                    "positionX": position_x,
+                    "positionY": baseline["positionY"],
+                    "rotation": baseline["rotation"],
+                    "size": baseline["size"],
+                },
+            )
+        except Exception:
+            logger.exception(
+                "VTS MoveModelRequest failed (flying=%s, target_x=%s)", flying, target_x
+            )
+            self.publish(
+                Event(
+                    kind=Kind.ERROR,
+                    payload={"component": "vts", "message": "move model failed"},
+                )
+            )
+
+    async def _ensure_baseline(self) -> dict | None:
+        if self._baseline is not None:
+            return self._baseline
+        try:
+            resp = await self.client.request("CurrentModelRequest")
+        except Exception:
+            logger.exception("VTS CurrentModelRequest failed, can't establish fly baseline")
+            self.publish(
+                Event(
+                    kind=Kind.ERROR,
+                    payload={"component": "vts", "message": "fly baseline lookup failed"},
+                )
+            )
+            return None
+        self._baseline = resp["data"]["modelPosition"]
+        return self._baseline
+
+    async def _toggle_expression(self, *, active: bool) -> None:
+        try:
+            await self.client.request(
+                "ExpressionActivationRequest",
+                {"expressionFile": self.fly_config.hotkey, "active": active, "fadeTime": 0.25},
+            )
+        except Exception:
+            logger.exception("VTS fly expression toggle failed (active=%s)", active)
+            self.publish(
+                Event(
+                    kind=Kind.ERROR,
+                    payload={"component": "vts", "message": "fly expression toggle failed"},
+                )
+            )
