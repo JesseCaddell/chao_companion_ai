@@ -1107,11 +1107,12 @@ around it," which resolved the single biggest open question.
   `Fly`/`VTSFlySubscriber` classes end-to-end (synthetic `director.mood`
   events standing in for the LLM emitting real tags) against the running
   VTS instance. User confirmed: **glided smoothly both ways** (no
-  snapping) and **the ball trailed during the move** — the rig's §8.2
+  snapping), **the ball trailed during the move** — the rig's §8.2
   physics group reacting to root model movement exactly like it already
-  does to head movement, with no extra code. Did not get explicit
-  confirmation either way on the `fly` expression's visual (wings or
-  similar) — worth a specific look next time VTS is open.
+  does to head movement, with no extra code — and **the fly expression
+  visibly switched the chao from sitting to flying pose** while it moved
+  across the screen. All three channels (position, ball lag, expression
+  toggle) confirmed working together, not just individually.
 - 21 new tests (`Fly`/`FlyConfig`/`load_fly_config` in
   `test_director_aliveness.py`, `VTSFlySubscriber` in `test_outputs_vts.py`),
   full suite at 147 passed, ruff clean.
