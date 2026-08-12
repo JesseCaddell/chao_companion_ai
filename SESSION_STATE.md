@@ -4,6 +4,195 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
+## Stopping point (end of session 9, 2026-08-11)
+
+Picked up session 8's TTS thread: Piper is now actually installed, not just
+chosen.
+
+- **`piper-tts` added as a project dependency** (`uv add piper-tts`) — pulls
+  in `onnxruntime` CPU-only (no CUDA extras), consistent with invariant 1.
+- **Voice: `en_US-amy-medium`**, the user's explicit placeholder pick.
+  Downloaded via `python -m piper.download_voices` into `data/voices/`
+  (`.onnx` + `.onnx.json`, ~63MB). Gitignored (`data/voices/*.onnx*`) —
+  same treatment as `chao.db`/`vts_token.txt`: large, regenerable, not
+  source. User is separately compiling/preparing a custom childlike voice
+  in parallel (referenced a `shift_voice.py` tool outside this repo); that
+  slots in later as a config-only swap, per session 8's plan.
+- **`src/chao/outputs/tts.py` (new)** — `PiperBackend`, following the same
+  injectable-client shape as `AnthropicBackend`/`OllamaBackend` so tests
+  don't need a real model loaded. `synthesize(text)` is an async generator
+  yielding one `AudioChunk` (mono float32 PCM + sample rate) per sentence —
+  Piper's own `PiperVoice.synthesize` already sentence-splits, so no
+  splitting logic needed here. The actual `onnxruntime` inference call is
+  blocking/CPU-bound, so it's run via `loop.run_in_executor`, not awaited
+  directly — keeps the rest of the bus (VTS, dashboard, aliveness) live
+  while a sentence renders. 4 new tests (fake voice, no real Piper
+  load), all passing; full suite at 126 passed, ruff clean.
+- **Verified for real, not just unit-tested:** ran `PiperBackend.synthesize`
+  against the actual downloaded `en_US-amy-medium` model end-to-end (a
+  three-sentence string), got back three real audio chunks at 22050Hz —
+  confirms the async/executor wrapping and the `AudioChunk` shape both work
+  against genuine Piper output, not just the fake.
+- **Deliberately not done yet:** `tts.py` is not wired into `turn.py` or
+  `__main__.py`. Nothing calls `PiperBackend` from the live pipeline, no
+  `output.speech_start`/`end` events are published, and there's no
+  `outputs/audio.py` yet for virtual-cable playback. That's real pipeline
+  wiring (turn.py's cancellation-critical path, per invariant 5) and a
+  bigger, separate step — this session only unblocks it by giving
+  `motion.py`'s §8.1 envelope extraction a real, concrete `AudioChunk`
+  shape to consume, which was the actual point of doing Piper now rather
+  than later.
+
+### Session 9, part 2: the fly state machine + horizontal screen positioning
+
+User redirected `motion.py` scope before it was built: breathing is VTS-
+native (confirmed by the user), idle sway is low priority, and the real
+ask was **the chao deciding to fly to different horizontal positions on
+screen**. Consulted the `advisor` tool before designing (per CLAUDE.md's
+"changing the Event schema" escalation trigger) — its guidance shaped
+everything below, in particular "probe `MoveModelRequest` before designing
+around it," which resolved the single biggest open question.
+
+- **Live probe result (the architectural fork):** `MoveModelRequest`
+  genuinely **interpolates** over `timeInSeconds` — does not snap. Raw
+  `CurrentModelRequest` samples mid-move showed positionX moving from
+  baseline (~-0.026) through -0.24 (t=0.5s) and -0.36 (t=1.0s) to -0.40
+  (t=2.2s, settled), for a request targeting -0.4 over 2.0s. This means
+  "fly to a new spot" is **one API call per destination** — no 60Hz tween
+  loop, no `motion.py` needed for this feature at all.
+- **`aliveness.py`: `Fly` (new)** — §6.4's on/off hysteresis state machine,
+  pure and `FakeClock`-testable like `mood.py`. Driven by `director.mood`
+  (arousal, for on_above/off_below) and `director.tag` (an unconditional
+  "land on `[sad]`" hard rule that bypasses both the threshold and
+  `min_dwell_s`). While already flying, a `director.mood` arrival that
+  doesn't trigger landing is also the (rate-limited via `min_reposition_s`)
+  trigger to consider a new horizontal target — reuses an existing,
+  activity-tied signal instead of a periodic timer, per §10.2's "noise not
+  pacing" spirit. Publishes `state.fly` (§13's existing kind, no schema
+  change — just an added `target_x` field: the new x when `flying`, `None`
+  when landing, read by the VTS side as "return to rest").
+  - **Known, documented limitation:** no periodic tick, same as `Mood`.
+    `director.mood` only fires when a tag nudges mood, so in a genuinely
+    quiet stretch a flying chao won't re-evaluate arousal and won't land
+    on its own. Needs §10.1's timescale loop to fully close — a separate,
+    larger piece of work, not attempted this session.
+- **`outputs/vts.py`: `VTSFlySubscriber` (new)** — turns `state.fly` into
+  a `MoveModelRequest` (positionX from the event, Y/rotation/size held at
+  a baseline captured once via `CurrentModelRequest` on first use) plus an
+  `ExpressionActivationRequest` toggle for the `fly` visual itself. Unlike
+  `VTSEmoteSubscriber`'s pool emotes, the fly expression is a **sustained**
+  toggle with no auto-deactivate timer — §6.1 lists `fly` as its own
+  `state` channel, not a transient eyes/ball emote, so CLAUDE.md's "never
+  sustain an authored emote beyond ~4s" doesn't apply to it. Shares the
+  existing VTS websocket connection with `VTSEmoteSubscriber` rather than
+  opening a second one — both now live inside `_run_vts_subscriber`.
+- **`config/emotes.yaml`'s `fly:` block extended:** `x_range: [-0.4, 0.4]`
+  (conservative placeholder — -0.4 confirmed reachable and glided
+  correctly, but the exact visible window edges haven't been checked by
+  eye against the real OBS-capture framing), `move_duration_s: 2.0`,
+  `land_duration_s: 1.5`, `min_reposition_s: 8.0`.
+- **Verified live, twice:** the `MoveModelRequest` probe itself (raw API
+  numbers only), then a second, separate live check running the actual
+  `Fly`/`VTSFlySubscriber` classes end-to-end (synthetic `director.mood`
+  events standing in for the LLM emitting real tags) against the running
+  VTS instance. User confirmed: **glided smoothly both ways** (no
+  snapping), **the ball trailed during the move** — the rig's §8.2
+  physics group reacting to root model movement exactly like it already
+  does to head movement, with no extra code — and **the fly expression
+  visibly switched the chao from sitting to flying pose** while it moved
+  across the screen. All three channels (position, ball lag, expression
+  toggle) confirmed working together, not just individually.
+- 21 new tests (`Fly`/`FlyConfig`/`load_fly_config` in
+  `test_director_aliveness.py`, `VTSFlySubscriber` in `test_outputs_vts.py`),
+  full suite at 147 passed, ruff clean.
+- **Design doc updated:** §6.4 gets a session-9 update block documenting
+  the interpolation finding and the known landing-in-quiet-stretches gap.
+  §10.1's micro-timescale row also corrected — breathing and the ball
+  spring are both native to VTS/the rig, not this layer's job; blink
+  timing is left as still-owned pending a check.
+- **Not done / still open:** exact `x_range` bounds vs. the real visible
+  window (needs a by-eye check, not just "didn't error"); whether VTS
+  persists a moved position across a restart if the process dies mid-
+  flight instead of landing cleanly first (low risk, not tested).
+
+### Session 9, part 3: the timescale loop (minimal — one rate, not three)
+
+User asked for "the timescale loop" next. Consulted `advisor` before
+building it, since §10.1 nominally specifies three tiers (60Hz/~1Hz/~1min)
+and the same "build only what has a real consumer" lesson from part 2
+applied again: no bound VTS parameters exist (60Hz has nothing to drive),
+the dashboard's mood plot doesn't exist (nothing renders a continuous
+mood stream), and §10.6's macro accumulators aren't built. The one real
+consumer today is `Fly` landing during silence — `director.mood` only
+fired when a tag nudged it, so a flying chao could never re-evaluate
+arousal and land on its own. Built exactly that, nothing more.
+
+- **`mood.py`: `Mood.tick(now)` (new)** — decay-only path (no tag delta),
+  sharing `_decay_to` with `handle()` so a tick immediately before a tag
+  provably lands on the same point a tag alone would at the same wall-clock
+  time (exponential decay is step-invariant if and only if both paths run
+  the same code — verified with an explicit equivalence test, not just
+  asserted). Publishes `director.mood` with `turn_id=None` and
+  `source="tick"`, but only when the point moved more than
+  `_TICK_PUBLISH_EPSILON` since the last tick — near baseline, decay
+  asymptotes and this naturally goes quiet instead of putting one event on
+  the bus every second forever. `handle()` now also tags its payload
+  `source="tag"` (existing exact-payload tests updated).
+- **`MoodConfig.tick_interval_s`** (new field, default 1.0s) — read from
+  `emotes.yaml`'s `mood:` block, same as the other mood tuning values.
+- **`__main__.py`: `_run_mood` reworked**, not a new task — wraps
+  `sub.get()` in `asyncio.wait_for(..., timeout=tick_interval_s)`; a
+  `TimeoutError` calls `mood.tick()` instead of a second task sharing the
+  same `Mood` instance. Simpler, and safe regardless (`Mood`'s methods are
+  synchronous, no internal awaits, so there's no interleaving hazard even
+  with two callers) — one task, one loop won out on simplicity alone.
+- **`aliveness.py`: `Fly._on_mood` gated** — advisor flagged this before
+  it became a live bug: with ticks now flowing through the same
+  `director.mood` path repositioning already listens to, an unguarded
+  `Fly` would pace to a new x every `min_reposition_s` with zero real
+  activity, exactly the caged-pacing failure §10.2 warns against. Fixed by
+  checking `event.payload["source"] == "tag"` before repositioning — the
+  on/above and off/below hysteresis checks stay unconditional (both
+  sources should be able to launch/land), only repositioning is
+  tag-gated. Existing `Fly` tests already defaulted their `mood_event()`
+  helper to `source="tag"`, so they kept passing unchanged; new tests
+  added specifically for tick-sourced landing (works) and tick-sourced
+  repositioning (correctly suppressed).
+- **Found and fixed a real test bug while writing the `_run_mood`
+  real-bus test:** publishing an event immediately after
+  `asyncio.create_task(_run_mood(...))` raced the task's own
+  `bus.subscribe()` call — same class of bug as session 8's VTS subscriber
+  fix, just in test code this time, not production. Fixed with
+  `await asyncio.sleep(0)` between task creation and publish to let
+  `_run_mood` reach its subscribe call first.
+- 8 new tests (5 for `Mood.tick()`, 2 for `Fly`'s source-gating, 1 for the
+  real-bus `_run_mood` wiring), full suite at 155 passed, ruff clean.
+- **Verified live, twice more:** first, the existing `Fly`/`VTSFlySubscriber`
+  live-check pattern reused to confirm the tick-driven landing path calls
+  the same, already-visually-confirmed `MoveModelRequest`/
+  `ExpressionActivationRequest` sequence. Second, a dedicated live run:
+  launched with a single `[angry]` tag, then genuinely no further
+  events — landed on its own after ~14s (half-life shortened to 5s for a
+  faster demo; thresholds/tick rate left as configured) purely from
+  `Mood.tick()` re-decaying arousal below `off_below`. Not watched live
+  this particular run (user wasn't at the screen), so this is confirmed at
+  the API/log level — real `Fly.flying` transition, real VTS calls issued —
+  but not re-confirmed by eye this time; the underlying VTS calls
+  themselves were already visually confirmed working in part 2's check.
+
+**End of day 2026-08-11.** Three commits landed and pushed
+(`584771a` Piper install + `PiperBackend`, `60c75e3`/`e7fb8bf` the fly
+state machine with horizontal positioning, `1796383` the minimal
+timescale loop): Piper is installed with a placeholder voice and a
+tested, live-verified synthesis interface; §6.4's fly state machine now
+flies the chao to different horizontal screen positions and back, with
+the ball trailing and the fly expression toggling correctly, all
+confirmed live; and a flying chao now lands on its own during silence via
+`Mood.tick()`, without needing a fresh tag. Working tree clean, full
+suite green (155 passed), pushed to `origin/master`. Next session's
+natural entry points: the attention model (§10.3), or eyeballing the fly
+`x_range` bounds against the real stream layout (see Next actions below).
+
 ## Stopping point (end of session 8, 2026-08-08)
 
 Picked the TTS engine (**Piper**, confirming the design doc's existing
@@ -1014,182 +1203,6 @@ dashboard skeleton work), so — same as before — nobody has visually
 confirmed the rendered UI actually looks right inside the window. Process
 health plus a confirmed-correct HTTP response is real evidence something
 is working, but it is not the same as having seen it.
-
-## Stopping point (session 9, 2026-08-11)
-
-Picked up session 8's TTS thread: Piper is now actually installed, not just
-chosen.
-
-- **`piper-tts` added as a project dependency** (`uv add piper-tts`) — pulls
-  in `onnxruntime` CPU-only (no CUDA extras), consistent with invariant 1.
-- **Voice: `en_US-amy-medium`**, the user's explicit placeholder pick.
-  Downloaded via `python -m piper.download_voices` into `data/voices/`
-  (`.onnx` + `.onnx.json`, ~63MB). Gitignored (`data/voices/*.onnx*`) —
-  same treatment as `chao.db`/`vts_token.txt`: large, regenerable, not
-  source. User is separately compiling/preparing a custom childlike voice
-  in parallel (referenced a `shift_voice.py` tool outside this repo); that
-  slots in later as a config-only swap, per session 8's plan.
-- **`src/chao/outputs/tts.py` (new)** — `PiperBackend`, following the same
-  injectable-client shape as `AnthropicBackend`/`OllamaBackend` so tests
-  don't need a real model loaded. `synthesize(text)` is an async generator
-  yielding one `AudioChunk` (mono float32 PCM + sample rate) per sentence —
-  Piper's own `PiperVoice.synthesize` already sentence-splits, so no
-  splitting logic needed here. The actual `onnxruntime` inference call is
-  blocking/CPU-bound, so it's run via `loop.run_in_executor`, not awaited
-  directly — keeps the rest of the bus (VTS, dashboard, aliveness) live
-  while a sentence renders. 4 new tests (fake voice, no real Piper
-  load), all passing; full suite at 126 passed, ruff clean.
-- **Verified for real, not just unit-tested:** ran `PiperBackend.synthesize`
-  against the actual downloaded `en_US-amy-medium` model end-to-end (a
-  three-sentence string), got back three real audio chunks at 22050Hz —
-  confirms the async/executor wrapping and the `AudioChunk` shape both work
-  against genuine Piper output, not just the fake.
-- **Deliberately not done yet:** `tts.py` is not wired into `turn.py` or
-  `__main__.py`. Nothing calls `PiperBackend` from the live pipeline, no
-  `output.speech_start`/`end` events are published, and there's no
-  `outputs/audio.py` yet for virtual-cable playback. That's real pipeline
-  wiring (turn.py's cancellation-critical path, per invariant 5) and a
-  bigger, separate step — this session only unblocks it by giving
-  `motion.py`'s §8.1 envelope extraction a real, concrete `AudioChunk`
-  shape to consume, which was the actual point of doing Piper now rather
-  than later.
-
-### Session 9, part 2: the fly state machine + horizontal screen positioning
-
-User redirected `motion.py` scope before it was built: breathing is VTS-
-native (confirmed by the user), idle sway is low priority, and the real
-ask was **the chao deciding to fly to different horizontal positions on
-screen**. Consulted the `advisor` tool before designing (per CLAUDE.md's
-"changing the Event schema" escalation trigger) — its guidance shaped
-everything below, in particular "probe `MoveModelRequest` before designing
-around it," which resolved the single biggest open question.
-
-- **Live probe result (the architectural fork):** `MoveModelRequest`
-  genuinely **interpolates** over `timeInSeconds` — does not snap. Raw
-  `CurrentModelRequest` samples mid-move showed positionX moving from
-  baseline (~-0.026) through -0.24 (t=0.5s) and -0.36 (t=1.0s) to -0.40
-  (t=2.2s, settled), for a request targeting -0.4 over 2.0s. This means
-  "fly to a new spot" is **one API call per destination** — no 60Hz tween
-  loop, no `motion.py` needed for this feature at all.
-- **`aliveness.py`: `Fly` (new)** — §6.4's on/off hysteresis state machine,
-  pure and `FakeClock`-testable like `mood.py`. Driven by `director.mood`
-  (arousal, for on_above/off_below) and `director.tag` (an unconditional
-  "land on `[sad]`" hard rule that bypasses both the threshold and
-  `min_dwell_s`). While already flying, a `director.mood` arrival that
-  doesn't trigger landing is also the (rate-limited via `min_reposition_s`)
-  trigger to consider a new horizontal target — reuses an existing,
-  activity-tied signal instead of a periodic timer, per §10.2's "noise not
-  pacing" spirit. Publishes `state.fly` (§13's existing kind, no schema
-  change — just an added `target_x` field: the new x when `flying`, `None`
-  when landing, read by the VTS side as "return to rest").
-  - **Known, documented limitation:** no periodic tick, same as `Mood`.
-    `director.mood` only fires when a tag nudges mood, so in a genuinely
-    quiet stretch a flying chao won't re-evaluate arousal and won't land
-    on its own. Needs §10.1's timescale loop to fully close — a separate,
-    larger piece of work, not attempted this session.
-- **`outputs/vts.py`: `VTSFlySubscriber` (new)** — turns `state.fly` into
-  a `MoveModelRequest` (positionX from the event, Y/rotation/size held at
-  a baseline captured once via `CurrentModelRequest` on first use) plus an
-  `ExpressionActivationRequest` toggle for the `fly` visual itself. Unlike
-  `VTSEmoteSubscriber`'s pool emotes, the fly expression is a **sustained**
-  toggle with no auto-deactivate timer — §6.1 lists `fly` as its own
-  `state` channel, not a transient eyes/ball emote, so CLAUDE.md's "never
-  sustain an authored emote beyond ~4s" doesn't apply to it. Shares the
-  existing VTS websocket connection with `VTSEmoteSubscriber` rather than
-  opening a second one — both now live inside `_run_vts_subscriber`.
-- **`config/emotes.yaml`'s `fly:` block extended:** `x_range: [-0.4, 0.4]`
-  (conservative placeholder — -0.4 confirmed reachable and glided
-  correctly, but the exact visible window edges haven't been checked by
-  eye against the real OBS-capture framing), `move_duration_s: 2.0`,
-  `land_duration_s: 1.5`, `min_reposition_s: 8.0`.
-- **Verified live, twice:** the `MoveModelRequest` probe itself (raw API
-  numbers only), then a second, separate live check running the actual
-  `Fly`/`VTSFlySubscriber` classes end-to-end (synthetic `director.mood`
-  events standing in for the LLM emitting real tags) against the running
-  VTS instance. User confirmed: **glided smoothly both ways** (no
-  snapping), **the ball trailed during the move** — the rig's §8.2
-  physics group reacting to root model movement exactly like it already
-  does to head movement, with no extra code — and **the fly expression
-  visibly switched the chao from sitting to flying pose** while it moved
-  across the screen. All three channels (position, ball lag, expression
-  toggle) confirmed working together, not just individually.
-- 21 new tests (`Fly`/`FlyConfig`/`load_fly_config` in
-  `test_director_aliveness.py`, `VTSFlySubscriber` in `test_outputs_vts.py`),
-  full suite at 147 passed, ruff clean.
-- **Design doc updated:** §6.4 gets a session-9 update block documenting
-  the interpolation finding and the known landing-in-quiet-stretches gap.
-  §10.1's micro-timescale row also corrected — breathing and the ball
-  spring are both native to VTS/the rig, not this layer's job; blink
-  timing is left as still-owned pending a check.
-- **Not done / still open:** exact `x_range` bounds vs. the real visible
-  window (needs a by-eye check, not just "didn't error"); whether VTS
-  persists a moved position across a restart if the process dies mid-
-  flight instead of landing cleanly first (low risk, not tested).
-
-### Session 9, part 3: the timescale loop (minimal — one rate, not three)
-
-User asked for "the timescale loop" next. Consulted `advisor` before
-building it, since §10.1 nominally specifies three tiers (60Hz/~1Hz/~1min)
-and the same "build only what has a real consumer" lesson from part 2
-applied again: no bound VTS parameters exist (60Hz has nothing to drive),
-the dashboard's mood plot doesn't exist (nothing renders a continuous
-mood stream), and §10.6's macro accumulators aren't built. The one real
-consumer today is `Fly` landing during silence — `director.mood` only
-fired when a tag nudged it, so a flying chao could never re-evaluate
-arousal and land on its own. Built exactly that, nothing more.
-
-- **`mood.py`: `Mood.tick(now)` (new)** — decay-only path (no tag delta),
-  sharing `_decay_to` with `handle()` so a tick immediately before a tag
-  provably lands on the same point a tag alone would at the same wall-clock
-  time (exponential decay is step-invariant if and only if both paths run
-  the same code — verified with an explicit equivalence test, not just
-  asserted). Publishes `director.mood` with `turn_id=None` and
-  `source="tick"`, but only when the point moved more than
-  `_TICK_PUBLISH_EPSILON` since the last tick — near baseline, decay
-  asymptotes and this naturally goes quiet instead of putting one event on
-  the bus every second forever. `handle()` now also tags its payload
-  `source="tag"` (existing exact-payload tests updated).
-- **`MoodConfig.tick_interval_s`** (new field, default 1.0s) — read from
-  `emotes.yaml`'s `mood:` block, same as the other mood tuning values.
-- **`__main__.py`: `_run_mood` reworked**, not a new task — wraps
-  `sub.get()` in `asyncio.wait_for(..., timeout=tick_interval_s)`; a
-  `TimeoutError` calls `mood.tick()` instead of a second task sharing the
-  same `Mood` instance. Simpler, and safe regardless (`Mood`'s methods are
-  synchronous, no internal awaits, so there's no interleaving hazard even
-  with two callers) — one task, one loop won out on simplicity alone.
-- **`aliveness.py`: `Fly._on_mood` gated** — advisor flagged this before
-  it became a live bug: with ticks now flowing through the same
-  `director.mood` path repositioning already listens to, an unguarded
-  `Fly` would pace to a new x every `min_reposition_s` with zero real
-  activity, exactly the caged-pacing failure §10.2 warns against. Fixed by
-  checking `event.payload["source"] == "tag"` before repositioning — the
-  on/above and off/below hysteresis checks stay unconditional (both
-  sources should be able to launch/land), only repositioning is
-  tag-gated. Existing `Fly` tests already defaulted their `mood_event()`
-  helper to `source="tag"`, so they kept passing unchanged; new tests
-  added specifically for tick-sourced landing (works) and tick-sourced
-  repositioning (correctly suppressed).
-- **Found and fixed a real test bug while writing the `_run_mood`
-  real-bus test:** publishing an event immediately after
-  `asyncio.create_task(_run_mood(...))` raced the task's own
-  `bus.subscribe()` call — same class of bug as session 8's VTS subscriber
-  fix, just in test code this time, not production. Fixed with
-  `await asyncio.sleep(0)` between task creation and publish to let
-  `_run_mood` reach its subscribe call first.
-- 8 new tests (5 for `Mood.tick()`, 2 for `Fly`'s source-gating, 1 for the
-  real-bus `_run_mood` wiring), full suite at 155 passed, ruff clean.
-- **Verified live, twice more:** first, the existing `Fly`/`VTSFlySubscriber`
-  live-check pattern reused to confirm the tick-driven landing path calls
-  the same, already-visually-confirmed `MoveModelRequest`/
-  `ExpressionActivationRequest` sequence. Second, a dedicated live run:
-  launched with a single `[angry]` tag, then genuinely no further
-  events — landed on its own after ~14s (half-life shortened to 5s for a
-  faster demo; thresholds/tick rate left as configured) purely from
-  `Mood.tick()` re-decaying arousal below `off_below`. Not watched live
-  this particular run (user wasn't at the screen), so this is confirmed at
-  the API/log level — real `Fly.flying` transition, real VTS calls issued —
-  but not re-confirmed by eye this time; the underlying VTS calls
-  themselves were already visually confirmed working in part 2's check.
 
 ## Next actions
 
