@@ -63,6 +63,9 @@ mood:                    # §6, §10 -- mood.py's valence/arousal resting point 
                             # >0.70) decays back toward once aliveness.py reads it -- raising
                             # it means more time spent flying at rest, not just during spikes.
   half_life_s: 20.0        # seconds for a mood nudge to decay halfway back to baseline
+  tick_interval_s: 1.0     # session 9's minimal timescale loop -- __main__.py's _run_mood
+                            # calls Mood.tick() on this timeout when no event arrives, so
+                            # decay progresses and Fly can land during a quiet stretch.
 
 reactions:            # non-verbal only, no LLM call
   anticipation:   curious   # §10.5 — wired up, see aliveness.py

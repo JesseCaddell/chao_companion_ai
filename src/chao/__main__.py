@@ -143,13 +143,22 @@ async def _run_aliveness(bus: Bus, emote_config: EmoteConfig) -> None:
 
 async def _run_mood(bus: Bus, mood_config: MoodConfig) -> None:
     """Runs mood.py's tag-driven valence/arousal tracking (design doc §6,
-    §10). No periodic tick yet -- see mood.py's docstring for why; this is
-    just a bus subscriber loop, same shape as `_run_aliveness`.
+    §10), plus session 9's minimal timescale loop: `sub.get()` is wrapped
+    in `asyncio.wait_for` with `tick_interval_s` as the timeout, so a quiet
+    stretch with no events calls `mood.tick()` instead of blocking forever.
+    One task, one loop -- simpler than a second task sharing the same
+    `Mood` instance, and safe: `Mood`'s methods are synchronous (no
+    internal awaits), so there's no interleaving to worry about even if
+    there were two callers.
     """
     mood = Mood(config=mood_config, publish=bus.publish)
     sub = bus.subscribe()
     while True:
-        event = await sub.get()
+        try:
+            event = await asyncio.wait_for(sub.get(), timeout=mood_config.tick_interval_s)
+        except TimeoutError:
+            mood.tick()
+            continue
         mood.handle(event)
 
 

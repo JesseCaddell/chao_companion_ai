@@ -100,6 +100,7 @@ def test_known_tag_nudges_valence_and_arousal_from_baseline():
         "arousal": 0.6,
         "baseline_valence": 0.0,
         "baseline_arousal": 0.0,
+        "source": "tag",
     }
 
 
@@ -190,3 +191,87 @@ def test_starts_at_the_configured_baseline():
 
     assert mood.valence == 0.2
     assert mood.arousal == 0.3
+
+
+# --- Mood.tick() ---
+
+
+def test_tick_decays_toward_baseline_and_publishes():
+    clock = FakeClock()
+    mood, events = make_mood(config=make_config(half_life_s=10.0), clock=clock)
+    mood.handle(tag_event("angry"))  # arousal 0.8 from a 0.0 baseline
+    events.clear()
+    clock.advance(10.0)  # one half-life
+
+    mood.tick()
+
+    assert math.isclose(mood.arousal, 0.4, abs_tol=1e-9)
+    assert events[0].kind == Kind.DIRECTOR_MOOD
+    assert events[0].payload["source"] == "tick"
+    assert events[0].turn_id is None
+
+
+def test_tick_near_baseline_does_not_publish():
+    """Successive ticks move the point by less and less as it approaches
+    baseline -- below _TICK_PUBLISH_EPSILON, a tick should go quiet rather
+    than putting an event on the bus every interval forever.
+    """
+    clock = FakeClock()
+    mood, events = make_mood(config=make_config(half_life_s=10.0), clock=clock)
+    mood.handle(tag_event("angry"))
+    clock.advance(1000.0)  # 100 half-lives -- already settled at baseline
+    mood.tick()
+    events.clear()
+
+    clock.advance(1.0)
+    mood.tick()
+
+    assert events == []
+
+
+def test_tick_alone_does_not_move_baseline_valence_or_arousal():
+    clock = FakeClock()
+    mood, events = make_mood(
+        config=make_config(baseline_valence=0.0, baseline_arousal=0.0), clock=clock
+    )
+    clock.advance(5.0)
+
+    mood.tick()
+
+    assert mood.valence == 0.0
+    assert mood.arousal == 0.0
+    assert events == []  # no movement from baseline -> nothing to publish
+
+
+def test_tick_immediately_before_a_tag_matches_a_tag_alone_at_the_same_time():
+    """The equivalence that matters for correctness: decay is exponential,
+    so stepping through an intermediate tick must land on exactly the same
+    point a tag arriving alone at the same wall-clock time would, as long
+    as both paths share the same decay code (mood.py's `_decay_to`).
+    """
+    clock_a = FakeClock()
+    mood_a, _ = make_mood(config=make_config(half_life_s=10.0), clock=clock_a)
+    mood_a.handle(tag_event("angry"))
+    clock_a.advance(0.9)
+    mood_a.tick()
+    clock_a.advance(0.1)
+    mood_a.handle(tag_event("sad"))
+
+    clock_b = FakeClock()
+    mood_b, _ = make_mood(config=make_config(half_life_s=10.0), clock=clock_b)
+    mood_b.handle(tag_event("angry"))
+    clock_b.advance(1.0)
+    mood_b.handle(tag_event("sad"))
+
+    assert math.isclose(mood_a.valence, mood_b.valence, abs_tol=1e-9)
+    assert math.isclose(mood_a.arousal, mood_b.arousal, abs_tol=1e-9)
+
+
+def test_tick_accepts_an_explicit_now():
+    mood, events = make_mood(config=make_config(half_life_s=10.0))
+    mood.handle(tag_event("angry"))
+    events.clear()
+
+    mood.tick(now=10.0)
+
+    assert events[0].payload["source"] == "tick"

@@ -2,24 +2,35 @@
 
 Scope for this pass, deliberately narrow, mirroring aliveness.py's precedent:
 
-- `Mood` subscribes to `director.tag` only. Each recognized tag applies its
+- `Mood.handle` reacts to `director.tag`: each recognized tag applies its
   §6.2 valence/arousal delta, clamped to [-1, 1], on top of whatever the
   point has decayed to since the last update.
-- Decay is lazy: computed from `now - last_update` whenever a tag arrives,
-  not on a timer. There's no periodic tick yet because nothing in the
-  codebase runs one -- aliveness.py owns the micro/meso/macro timescales
-  (§10.1) and will call `Mood.tick(now)` once its own timer loop exists.
-  Between tags the point is frozen for dashboard purposes; the math is
-  still correct, it just isn't re-emitted until something moves it.
-- Publishes `director.mood` (a new bus contract as of this module -- payload
-  is `{valence, arousal, baseline_valence, baseline_arousal}`) so the
-  dashboard's event feed and eventual mood plot (§11.2 item 4) can render
-  it; nothing subscribes yet besides the generic event-feed relay.
+- `Mood.tick(now)` (session 9) is the periodic path promised by this
+  docstring's earlier draft -- `__main__.py`'s `_run_mood` now calls it on
+  a timeout when no event arrives within `tick_interval_s`, so decay
+  actually progresses during quiet stretches instead of being frozen until
+  the next tag. Both paths share `_decay_to`, the same `decay()` call --
+  this matters: a tick immediately before a tag must land on the exact
+  same point a tag alone would, decay being exponential (and therefore
+  step-invariant) makes that true as long as the code path is shared, not
+  reimplemented.
+- `tick()` only publishes `director.mood` when the point actually moved by
+  more than `_TICK_PUBLISH_EPSILON` since the last tick -- near baseline,
+  decay asymptotes and successive ticks move it by less and less, so this
+  naturally goes quiet rather than putting one event/tick on the bus
+  forever. `handle()` always publishes; a tag is real activity, not a
+  background poll.
+- Publishes `director.mood` with payload `{valence, arousal,
+  baseline_valence, baseline_arousal, source}`. `source` is `"tag"` or
+  `"tick"` -- `aliveness.py`'s `Fly` reads it to tell real activity from a
+  background poll, since only tag-sourced events should trigger picking a
+  new horizontal fly target (see `Fly._on_mood`'s docstring: a tick
+  triggering repositioning would make a flying chao pace on a timer with
+  zero activity, exactly what §10.2 warns against).
 
-Not in this pass, deliberately: `fly`'s hysteresis (§6.4, aliveness.py's
-job -- it owns `state.fly`) and heart gating (§6.3, needs per-viewer
-affinity from memory, phase 6). Both already have config parked in
-emotes.yaml's `fly:`/`heart_gate:` blocks; this module doesn't touch them.
+Not in this pass, deliberately: heart gating (§6.3, needs per-viewer
+affinity from memory, phase 6) -- `emotes.yaml`'s `heart_gate:` block is
+still aspirational.
 """
 
 from __future__ import annotations
@@ -67,11 +78,20 @@ def _clamp(value: float) -> float:
     return max(-1.0, min(1.0, value))
 
 
+# How far valence/arousal must move in a single tick before it's worth a
+# director.mood event. Not a YAML tuning knob like the deltas/half-life
+# above -- this is a numerical noise floor for event-bus volume, not a
+# "feel" parameter, and moving it doesn't change any observable behavior
+# except how chatty the tick path is.
+_TICK_PUBLISH_EPSILON = 1e-4
+
+
 @dataclass(frozen=True, slots=True)
 class MoodConfig:
     baseline_valence: float = 0.0
     baseline_arousal: float = 0.0
     half_life_s: float = 20.0
+    tick_interval_s: float = 1.0
 
 
 def load_mood_config(path: Path) -> MoodConfig:
@@ -85,6 +105,7 @@ def load_mood_config(path: Path) -> MoodConfig:
         baseline_valence=float(raw.get("baseline_valence", 0.0)),
         baseline_arousal=float(raw.get("baseline_arousal", 0.0)),
         half_life_s=float(raw.get("half_life_s", 20.0)),
+        tick_interval_s=float(raw.get("tick_interval_s", 1.0)),
     )
 
 
@@ -110,7 +131,31 @@ class Mood:
         if delta is None:
             return
 
-        now = self.clock()
+        self._decay_to(self.clock())
+
+        dv, da = delta
+        self.valence = _clamp(self.valence + dv)
+        self.arousal = _clamp(self.arousal + da)
+
+        self._publish(event.turn_id, "tag")
+
+    def tick(self, now: float | None = None) -> None:
+        """Periodic path (§10.1's timescale loop) -- lets decay progress,
+        and lets a downstream state machine like `Fly` re-evaluate arousal,
+        without waiting on the next tag. See module docstring for the
+        shared-decay-path and epsilon-gating rationale.
+        """
+        prev_valence, prev_arousal = self.valence, self.arousal
+        self._decay_to(self.clock() if now is None else now)
+
+        moved = (
+            abs(self.valence - prev_valence) > _TICK_PUBLISH_EPSILON
+            or abs(self.arousal - prev_arousal) > _TICK_PUBLISH_EPSILON
+        )
+        if moved:
+            self._publish(None, "tick")
+
+    def _decay_to(self, now: float) -> None:
         elapsed = now - self._last_update
         self.valence = decay(
             self.valence, self.config.baseline_valence, elapsed, self.config.half_life_s
@@ -120,19 +165,17 @@ class Mood:
         )
         self._last_update = now
 
-        dv, da = delta
-        self.valence = _clamp(self.valence + dv)
-        self.arousal = _clamp(self.arousal + da)
-
+    def _publish(self, turn_id: str | None, source: str) -> None:
         self.publish(
             Event(
                 kind=Kind.DIRECTOR_MOOD,
-                turn_id=event.turn_id,
+                turn_id=turn_id,
                 payload={
                     "valence": self.valence,
                     "arousal": self.arousal,
                     "baseline_valence": self.config.baseline_valence,
                     "baseline_arousal": self.config.baseline_arousal,
+                    "source": source,
                 },
             )
         )

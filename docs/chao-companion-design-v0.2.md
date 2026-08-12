@@ -448,6 +448,8 @@ The system that makes the chao feel alive, running **independently of the LLM**.
 | **Meso** | ~1 Hz | Weight shifts, attention changes, small reactive emotes |
 | **Macro** | ~1/min | Mood baseline drift, boredom, energy decay, fly state |
 
+**Update (session 9):** built a single ~1Hz `Mood.tick()`, not this full three-tier structure — deliberately, per `advisor` guidance: micro has no bound VTS parameter to drive yet, meso's "reactive emotes" are already event-driven elsewhere, and macro's boredom/energy accumulators aren't built. The one real consumer was `Fly`'s hysteresis (§6.4), which previously could only re-evaluate arousal when a tag arrived and therefore could never land during silence. `Mood.tick()` fixes exactly that — decay now progresses on a timer (`emotes.yaml`'s `mood.tick_interval_s`), gated to only publish `director.mood` when the point actually moved. `Fly` distinguishes tick-sourced from tag-sourced `director.mood` events (a `source` field) so that only real activity (tags), not the background tick, triggers picking a new horizontal fly target — see aliveness.py's `Fly` docstring. The full three-tier structure remains future work, to be built if/when micro or macro get real consumers, not preemptively.
+
 **Update (session 9):** breathing and the ball spring both turned out to be native to VTS/the rig, not code this layer drives — same pattern as §8.2's ball-lag finding. Breathing is VTS's own idle animation; confirmed by the user, not independently re-verified against the live model this session. Blink timing has not been checked either way and is left here as still-owned by this layer until confirmed otherwise.
 
 ### 10.2 Noise, not sine waves

@@ -1124,8 +1124,72 @@ around it," which resolved the single biggest open question.
 - **Not done / still open:** exact `x_range` bounds vs. the real visible
   window (needs a by-eye check, not just "didn't error"); whether VTS
   persists a moved position across a restart if the process dies mid-
-  flight instead of landing cleanly first (low risk, not tested); the
-  timescale loop that would let landing happen without a subsequent tag.
+  flight instead of landing cleanly first (low risk, not tested).
+
+### Session 9, part 3: the timescale loop (minimal — one rate, not three)
+
+User asked for "the timescale loop" next. Consulted `advisor` before
+building it, since §10.1 nominally specifies three tiers (60Hz/~1Hz/~1min)
+and the same "build only what has a real consumer" lesson from part 2
+applied again: no bound VTS parameters exist (60Hz has nothing to drive),
+the dashboard's mood plot doesn't exist (nothing renders a continuous
+mood stream), and §10.6's macro accumulators aren't built. The one real
+consumer today is `Fly` landing during silence — `director.mood` only
+fired when a tag nudged it, so a flying chao could never re-evaluate
+arousal and land on its own. Built exactly that, nothing more.
+
+- **`mood.py`: `Mood.tick(now)` (new)** — decay-only path (no tag delta),
+  sharing `_decay_to` with `handle()` so a tick immediately before a tag
+  provably lands on the same point a tag alone would at the same wall-clock
+  time (exponential decay is step-invariant if and only if both paths run
+  the same code — verified with an explicit equivalence test, not just
+  asserted). Publishes `director.mood` with `turn_id=None` and
+  `source="tick"`, but only when the point moved more than
+  `_TICK_PUBLISH_EPSILON` since the last tick — near baseline, decay
+  asymptotes and this naturally goes quiet instead of putting one event on
+  the bus every second forever. `handle()` now also tags its payload
+  `source="tag"` (existing exact-payload tests updated).
+- **`MoodConfig.tick_interval_s`** (new field, default 1.0s) — read from
+  `emotes.yaml`'s `mood:` block, same as the other mood tuning values.
+- **`__main__.py`: `_run_mood` reworked**, not a new task — wraps
+  `sub.get()` in `asyncio.wait_for(..., timeout=tick_interval_s)`; a
+  `TimeoutError` calls `mood.tick()` instead of a second task sharing the
+  same `Mood` instance. Simpler, and safe regardless (`Mood`'s methods are
+  synchronous, no internal awaits, so there's no interleaving hazard even
+  with two callers) — one task, one loop won out on simplicity alone.
+- **`aliveness.py`: `Fly._on_mood` gated** — advisor flagged this before
+  it became a live bug: with ticks now flowing through the same
+  `director.mood` path repositioning already listens to, an unguarded
+  `Fly` would pace to a new x every `min_reposition_s` with zero real
+  activity, exactly the caged-pacing failure §10.2 warns against. Fixed by
+  checking `event.payload["source"] == "tag"` before repositioning — the
+  on/above and off/below hysteresis checks stay unconditional (both
+  sources should be able to launch/land), only repositioning is
+  tag-gated. Existing `Fly` tests already defaulted their `mood_event()`
+  helper to `source="tag"`, so they kept passing unchanged; new tests
+  added specifically for tick-sourced landing (works) and tick-sourced
+  repositioning (correctly suppressed).
+- **Found and fixed a real test bug while writing the `_run_mood`
+  real-bus test:** publishing an event immediately after
+  `asyncio.create_task(_run_mood(...))` raced the task's own
+  `bus.subscribe()` call — same class of bug as session 8's VTS subscriber
+  fix, just in test code this time, not production. Fixed with
+  `await asyncio.sleep(0)` between task creation and publish to let
+  `_run_mood` reach its subscribe call first.
+- 8 new tests (5 for `Mood.tick()`, 2 for `Fly`'s source-gating, 1 for the
+  real-bus `_run_mood` wiring), full suite at 155 passed, ruff clean.
+- **Verified live, twice more:** first, the existing `Fly`/`VTSFlySubscriber`
+  live-check pattern reused to confirm the tick-driven landing path calls
+  the same, already-visually-confirmed `MoveModelRequest`/
+  `ExpressionActivationRequest` sequence. Second, a dedicated live run:
+  launched with a single `[angry]` tag, then genuinely no further
+  events — landed on its own after ~14s (half-life shortened to 5s for a
+  faster demo; thresholds/tick rate left as configured) purely from
+  `Mood.tick()` re-decaying arousal below `off_below`. Not watched live
+  this particular run (user wasn't at the screen), so this is confirmed at
+  the API/log level — real `Fly.flying` transition, real VTS calls issued —
+  but not re-confirmed by eye this time; the underlying VTS calls
+  themselves were already visually confirmed working in part 2's check.
 
 ## Next actions
 
@@ -1153,17 +1217,16 @@ around it," which resolved the single biggest open question.
    horizontal screen positioning~~ — **done session 9** (`Fly` in
    `aliveness.py`, `VTSFlySubscriber` in `outputs/vts.py`, wired as
    `_run_fly`; see session 9 part 2's writeup — live-verified, glides
-   smoothly, ball trails correctly). What's left, in order:
-   - The micro/meso/macro timescale loop itself (§10.1: 60Hz/~1Hz/~1min) —
-     currently nothing calls `Mood.tick()` or re-evaluates `Fly`'s
-     hysteresis periodically; `Mood`, `Aliveness`, and `Fly` are all purely
-     event-reactive right now. Concretely blocks: `Fly` landing on its own
-     during a quiet stretch (no tags arriving), and any true idle
-     drift/breathing-adjacent behavior (though note breathing/blink turned
-     out to be VTS-native per session 9's design doc correction — the
-     remaining case for this loop is mood re-decay and fly's hysteresis,
-     not idle animation).
-   - The attention model (§10.3).
+   smoothly, ball trails correctly). ~~The timescale loop~~ — **done
+   session 9 part 3, deliberately minimal: one ~1Hz `Mood.tick()`, not
+   §10.1's full three-tier structure** (60Hz/meso still have no consumer —
+   see part 3's writeup for why building only the one rate with a real
+   consumer was the right call, per `advisor`). `Fly` now lands on its own
+   during a quiet stretch; confirmed at the API/VTS-call level live, not
+   re-watched by eye this particular run. What's left, in order:
+   - The attention model (§10.3) — still the natural next consumer for a
+     faster (meso, ~1Hz-ish) tick if it ends up needing one; don't assume
+     it does until it's actually being built.
    - `motion.py` itself may not be needed at all: session 9's
      `MoveModelRequest` probe found VTS interpolates natively, so the
      "chao moves around" feature didn't need a code-side tween loop. If a

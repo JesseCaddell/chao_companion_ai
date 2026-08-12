@@ -1,8 +1,9 @@
 import asyncio
 
-from chao.__main__ import build_pipeline
+from chao.__main__ import _run_mood, build_pipeline
 from chao.director.aliveness import Aliveness
 from chao.director.director import EmoteConfig, EmotePool
+from chao.director.mood import MoodConfig
 from chao.events import Event, Kind
 
 
@@ -150,3 +151,36 @@ async def test_aliveness_fires_anticipation_emote_on_a_real_bus():
         "reason": "anticipation",
     }
     assert kinds_seen.index(Kind.DIRECTOR_EMOTE) < kinds_seen.index(Kind.BRAIN_TOKEN)
+
+
+async def test_run_mood_ticks_on_a_quiet_stretch_over_a_real_bus():
+    """__main__.py's _run_mood wraps sub.get() in asyncio.wait_for with
+    tick_interval_s as the timeout -- confirms that wiring actually calls
+    Mood.tick() against a real bus when nothing is published, not just
+    that Mood.tick() works correctly in isolation (already covered by
+    test_director_mood.py).
+    """
+    bus, _ = build_pipeline(
+        identity="", emote_config=default_emote_config(), backend=FakeBackend([])
+    )
+    mood_config = MoodConfig(
+        baseline_valence=0.0, baseline_arousal=0.0, half_life_s=0.05, tick_interval_s=0.05
+    )
+
+    sub = bus.subscribe()
+    task = asyncio.create_task(_run_mood(bus, mood_config))
+    await asyncio.sleep(0)  # let _run_mood reach its own bus.subscribe() before publishing
+
+    bus.publish(Event(kind=Kind.DIRECTOR_TAG, turn_id="t1", payload={"tag": "angry"}))
+    tag_mood = await asyncio.wait_for(_next_of_kind(sub, Kind.DIRECTOR_MOOD), timeout=2.0)
+    tick_mood = await asyncio.wait_for(_next_of_kind(sub, Kind.DIRECTOR_MOOD), timeout=2.0)
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert tag_mood.payload["source"] == "tag"
+    assert tick_mood.payload["source"] == "tick"
+    assert tick_mood.turn_id is None

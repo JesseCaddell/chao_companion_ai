@@ -115,7 +115,7 @@ def make_fly(config=None, clock=None, rng=None) -> tuple[Fly, list[Event]]:
     return fly, events
 
 
-def mood_event(arousal: float, turn_id: str = "t1") -> Event:
+def mood_event(arousal: float, turn_id: str = "t1", source: str = "tag") -> Event:
     return Event(
         kind=Kind.DIRECTOR_MOOD,
         turn_id=turn_id,
@@ -124,6 +124,7 @@ def mood_event(arousal: float, turn_id: str = "t1") -> Event:
             "arousal": arousal,
             "baseline_valence": 0.0,
             "baseline_arousal": 0.0,
+            "source": source,
         },
     )
 
@@ -289,6 +290,40 @@ def test_target_x_stays_within_configured_bounds():
     fly.handle(mood_event(0.9))
 
     assert -0.3 <= fly.target_x <= 0.3
+
+
+# --- Fly.handle(): tick-sourced director.mood events (session 9) ---
+
+
+def test_tick_sourced_mood_event_can_land_during_a_quiet_stretch():
+    """The whole point of Mood.tick(): a flying chao must be able to land
+    from a background poll, not just from a fresh tag.
+    """
+    clock = FakeClock()
+    fly, events = make_fly(clock=clock)
+    fly.handle(mood_event(0.9, source="tag"))  # launches
+    clock.advance(5.0)  # past min_dwell_s
+
+    fly.handle(mood_event(0.1, source="tick"))
+
+    assert fly.flying is False
+    assert events[-1].payload["trigger"] == "arousal_low"
+
+
+def test_tick_sourced_mood_event_does_not_trigger_reposition():
+    """Repositioning must stay tied to real activity (tag-sourced events) --
+    a tick triggering it would make a flying chao pace to a new spot every
+    min_reposition_s with zero activity, the exact "pacing, not aliveness"
+    failure §10.2 warns against.
+    """
+    clock = FakeClock()
+    fly, events = make_fly(clock=clock, config=make_fly_config(min_reposition_s=8.0))
+    fly.handle(mood_event(0.9, source="tag"))  # launches
+    clock.advance(8.0)
+
+    fly.handle(mood_event(0.8, source="tick"))  # eligible by timing, wrong source
+
+    assert len(events) == 1  # only the launch -- no reposition fired
 
 
 def test_fly_carries_the_triggering_events_turn_id():

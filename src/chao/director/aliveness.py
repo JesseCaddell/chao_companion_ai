@@ -28,14 +28,23 @@ custom Live2D parameter, so it needs no manual binding step. A live probe
 `timeInSeconds` rather than snapping, so there's no tween loop to write:
 picking a destination and publishing it is the whole job.
 
-Still not built, deliberately: the micro/meso/macro idle-drift timescales
-(§10.1-10.3, §10.6) and attention model (§10.3). Those genuinely need
-continuous parameter injection, which per CLAUDE.md's phase-0 finding
-requires new custom VTS parameters bound by hand in the VTS UI first — a
-real dependency on work only the user can do (see SESSION_STATE.md's next
-actions). Building the noise generators now, with no bound parameter to
-watch them drive, would repeat the "UI over nothing" mistake the
-dashboard's other panels deliberately avoided.
+Also built this pass: a single ~1Hz `Mood.tick()` call, wired into
+`__main__.py`'s `_run_mood` (mood.py owns the tick method and the timing
+config; this module's `Fly` is the actual consumer — it's what lets a
+flying chao land on its own without waiting on a fresh tag). This is
+deliberately NOT §10.1's full micro/meso/macro three-tier structure — just
+the one rate that has a real consumer today. See mood.py's docstring for
+the tick/publish design, and `Fly._on_mood`'s docstring for why
+repositioning specifically ignores tick-sourced mood events.
+
+Still not built, deliberately: idle-drift noise (§10.2) and the attention
+model (§10.3), and therefore the 60Hz/meso tiers of §10.1 — those
+genuinely need continuous parameter injection, which per CLAUDE.md's
+phase-0 finding requires new custom VTS parameters bound by hand in the
+VTS UI first, a real dependency on work only the user can do (see
+SESSION_STATE.md's next actions). Building the noise generators now, with
+no bound parameter to watch them drive, would repeat the "UI over nothing"
+mistake the dashboard's other panels deliberately avoided.
 """
 
 from __future__ import annotations
@@ -127,25 +136,27 @@ class Fly:
 
     Driven by two event kinds:
 
-    - `director.mood` supplies arousal for the hysteresis check. While
-      already flying, a `director.mood` arrival that doesn't cross
-      `off_below` is also the trigger to consider picking a new horizontal
-      target (`min_reposition_s` apart) — reusing an existing, activity-
-      tied signal rather than a periodic timer, per §10.2's "noise, not
-      sine waves" spirit: repositioning should read as motivated, not like
-      pacing.
+    - `director.mood` supplies arousal for the hysteresis check —
+      launching and landing both react to *any* `director.mood` arrival,
+      tag-sourced or tick-sourced (session 9's `Mood.tick`), which is what
+      lets a flying chao land on its own during a quiet stretch instead of
+      needing a fresh tag. Repositioning is different: it's gated on
+      `event.payload["source"] == "tag"` specifically. A tick is a
+      background poll, not activity — letting it also trigger
+      repositioning would make a flying chao pace to a new spot every
+      `min_reposition_s` forever with zero activity, exactly what §10.2's
+      "noise, not sine waves" warns against. Tag-sourced events are real
+      activity (a tag the LLM actually emitted), so those are what
+      "motivated repositioning" means here.
     - `director.tag` is only checked for an unconditional "sad" tag, which
       lands immediately — bypassing both the arousal threshold and
       `min_dwell_s`. A chao that just turned sad shouldn't stay aloft for
       up to `min_dwell_s` more seconds because the tag landed right after
       a launch.
 
-    No periodic tick, same limitation as `Mood` (see its docstring):
-    `director.mood` only fires when a tag nudges mood, so in a genuinely
-    quiet stretch — no tags at all — a currently-flying chao will not
-    re-evaluate arousal and will not land on its own. Fixing this needs
-    the micro/meso/macro timescale loop (SESSION_STATE.md next actions),
-    a separate, larger piece of work; documented here rather than solved.
+    Landing during a quiet stretch works as of session 9's `Mood.tick` +
+    `__main__.py`'s `_run_mood` timeout loop — arousal now actually
+    re-decays and re-publishes on a timer, not just when a tag arrives.
 
     Publishes `state.fly` (§13's existing kind, extended payload):
     `{flying, trigger, target_x}`. `target_x` is the new horizontal
@@ -186,7 +197,7 @@ class Fly:
         elif self.flying and arousal < self.config.off_below:
             if now - self._last_transition >= self.config.min_dwell_s:
                 self._transition(False, "arousal_low", now, event.turn_id)
-        elif self.flying:
+        elif self.flying and event.payload.get("source") == "tag":
             self._maybe_reposition(now, event.turn_id)
 
     def _on_tag(self, event: Event) -> None:
