@@ -515,6 +515,16 @@ In rough order of how much they'll get used:
 8. **Override panel** — fire any emote, force a mood, inject a fake chat message, force a response, and the kill switch.
 9. **Session counters** — tokens, cost, response count, uptime.
 
+**Note (session 10):** when panels beyond the event feed get built, the
+dashboard also needs to surface operationally important addresses the
+streamer has to copy elsewhere — starting with the subtitle overlay's
+`/subtitles` URL (design doc §17, `dashboard/server.py`), which today only
+exists as something you have to know to go look up, not something the app
+tells you. Likely just a small "URLs" readout near session counters, not a
+full panel of its own. Flagged here so it doesn't get lost before the
+event-feed-only skeleton (§11.2 item 3, the only panel built so far)
+grows.
+
 ### 11.3 Two features worth the extra effort
 
 **Session replay.** Every event to JSONL; the dashboard can scrub a past session. You will constantly need to know what happened in the ten seconds *before* something strange, and you cannot investigate that live while streaming.

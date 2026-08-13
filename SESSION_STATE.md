@@ -208,8 +208,78 @@ eyeballed is exactly what a real flight looks like.
   a *centered* one — those aren't the same baseline, and a real
   implementation needs to pick one deliberately.
 
-Not yet committed (this subsection's changes: `config/emotes.yaml`'s
-`x_range`, `docs/rigging_check_list.md` items 2 and 3, this note).
+Committed (`71d5854`).
+
+### Session 10, part 3: attention model attempted, redirected to the subtitle overlay instead
+
+User asked to build §10.3's attention model next. Before writing code,
+checked it against what actually exists live and found the same "no real
+consumer" problem that shaped every cut earlier this session, just
+bigger: all four triggers lack a live source (streamer-speaks needs
+`input.voice`, phase 5; chat velocity/name-mention need real `input.chat`,
+phase 4 — neither built), and the output side has no bound VTS
+look-direction parameter either (confirmed rig groups are eyes/mood, ball
+icon/aura, ball position — nothing look-shaped), so per the phase-0
+finding it'd need a manual create-and-bind in VTS before any code could
+drive it regardless. Raised this with the user rather than building a
+state machine with no live inputs and nowhere to send its output.
+Consulted `advisor` first to pressure-test that read before raising it —
+confirmed, and flagged one more thing worth settling in design whenever
+this does get built: `[look:chat]`/`[look:you]` already exist as
+LLM-emitted tags producing `director.tag` telemetry, and an
+aliveness-owned focus state would want to drive the same look direction —
+a real arbitration question, not just an implementation detail.
+
+User's call: step back to design doc §17's actual phase order rather than
+jumping ahead. Re-checked phase 2 (design doc says phase 3/aliveness
+should follow a *finished* phase 2) against what's actually built:
+TTS/audio routing done this session, ball spring resolved earlier, but
+§8.1 envelope-driven motion (RMS→body bob/head nod) is unbuilt and has the
+identical VTS-binding blocker as the attention model's look parameter, and
+the subtitle overlay was flagged `TBD` in the design doc and never built.
+Personality/voice test segment was arguably already satisfied by the
+existing typed-input loop now that TTS is wired, just not confirmed as
+such. Offered the three options; user picked the subtitle overlay as the
+one with zero blockers.
+
+**Built:** `src/chao/dashboard/subtitles.html` — a plain static page
+(no build step, no framework, deliberately not part of the Vite dashboard
+app) meant as an OBS Browser Source URL, stream-facing rather than
+streamer-only. Connects to the same `/ws/events` the dashboard already
+relays (a second independent subscriber, publishes nothing) and reacts to
+two already-real event kinds: `output.speech_start` shows
+`payload.sentence` (the *original* spelling — the same TTS-only
+pronunciation fix invariant from earlier this session applies here too,
+transitively, since `Speaker` never publishes the rewritten text) with a
+hide-timer set to `payload.duration_ms`; `brain.request` (a new turn
+starting) force-clears whatever's showing immediately. That second rule
+exists specifically for the case a sentence gets cancelled mid-playback
+and never receives its own `speech_end` (this session's earlier TTS-wiring
+design, deliberately) — without it, that sentence's subtitle would sit on
+screen until its own hide-timer eventually expired, up to its full
+`duration_ms` later, regardless of what (if anything) was actually
+playing. `dashboard/server.py` serves it at `/subtitles` (registered
+before the dashboard's catch-all static mount, same ordering rationale as
+the existing `/ws/events` route). 2 new tests (route serves the page;
+route and `/ws/events` share one bus). Full suite at 181 passed, ruff
+clean.
+
+**Live-verified in a real browser**, not just unit-tested — a scratch
+FastAPI+Bus process publishing a timed event sequence, watched via
+Chrome automation (`claude-in-chrome`, which needed a reconnect mid-session
+— an environment hiccup, not a code issue). Confirmed by screenshot: text
+renders correctly (transparent page background, white text with a black
+outline, bottom-centered, legible), replaces cleanly across sentences, and
+the cancelled-sentence case actually works — a sentence published with a
+20s `duration_ms` was fully cleared well before that timeout, immediately
+after a simulated new-turn `brain.request`. No console errors. Timing
+across the two attempts drifted noticeably from the script's nominal
+delays (background-process startup lag, tool round-trip overhead) — noted
+in case a future live check needs generous timing margins again, not
+worth chasing further since the behavior itself was still caught cleanly
+on-screen.
+
+Not yet committed.
 
 ## Stopping point (end of session 9, 2026-08-11)
 

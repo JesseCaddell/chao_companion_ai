@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>chao subtitles</title>
+<style>
+  /* Transparent so OBS's Browser Source shows only the text, not a box.
+     No dashboard chrome here on purpose -- this is stream-facing, the
+     dashboard is streamer-only (see design doc §17). */
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+  }
+  #subtitle {
+    position: fixed;
+    left: 50%;
+    bottom: 6%;
+    transform: translateX(-50%);
+    max-width: 90vw;
+    text-align: center;
+    font-family: "Segoe UI", -apple-system, sans-serif;
+    font-size: 2.6vw;
+    font-weight: 700;
+    color: #ffffff;
+    /* Stroke via layered shadows, not -webkit-text-stroke -- that
+       property renders inside the glyph and thins small text; this
+       reads cleanly over any game footage at any font weight. */
+    text-shadow:
+      -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000,
+      0 4px 10px rgba(0, 0, 0, 0.6);
+    opacity: 0;
+    transition: opacity 0.15s ease-in-out;
+    white-space: pre-wrap;
+  }
+  #subtitle.visible {
+    opacity: 1;
+  }
+</style>
+</head>
+<body>
+<div id="subtitle"></div>
+<script>
+  // Driven by output.speech_start/output.speech_end (design doc §13,
+  // §17's phase-2 subtitle overlay row) over the same /ws/events stream
+  // the dashboard relays -- a second, independent subscriber, not a
+  // second publisher (bus.py invariant: dashboard-shaped consumers never
+  // publish).
+  const el = document.getElementById("subtitle");
+  let hideTimer = null;
+
+  function show(text, durationMs) {
+    if (hideTimer !== null) {
+      clearTimeout(hideTimer);
+    }
+    el.textContent = text;
+    el.classList.add("visible");
+    // duration_ms is computed from the real sample count (see
+    // outputs/speech.py), so this matches actual playback length for a
+    // completed sentence. A sentence cut short by cancellation publishes
+    // no speech_end (outputs/speech.py's Speaker.speak deliberately skips
+    // it -- see docs/tts_pronunciation_overrides.md-adjacent invariants
+    // in SESSION_STATE.md session 10), so this timer is also the only
+    // thing that clears text in that case -- there's no separate
+    // "cancelled" event to react to instead.
+    hideTimer = setTimeout(hide, durationMs);
+  }
+
+  function hide() {
+    hideTimer = null;
+    el.classList.remove("visible");
+  }
+
+  function connect() {
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${scheme}://${location.host}/ws/events`);
+
+    ws.onmessage = (msg) => {
+      const event = JSON.parse(msg.data);
+      if (event.kind === "output.speech_start") {
+        show(event.payload.sentence, event.payload.duration_ms);
+      } else if (event.kind === "brain.request") {
+        // A fresh turn starting means whatever was on screen belongs to
+        // a conversational moment that's over, even if a previous
+        // cancelled sentence never got its own hide timer to fire yet
+        // (e.g. preempted well before duration_ms elapsed).
+        if (hideTimer !== null) {
+          clearTimeout(hideTimer);
+          hideTimer = null;
+        }
+        hide();
+      }
+    };
+
+    // Reconnect on drop (server restart during dev, brief network blip)
+    // rather than leaving the overlay silently dead for the rest of the
+    // stream -- same "degrade, don't crash" spirit as the VTS subscriber.
+    ws.onclose = () => setTimeout(connect, 1000);
+  }
+
+  connect();
+</script>
+</body>
+</html>

@@ -17,6 +17,12 @@ Also serves the built frontend (`web/dist/`, via `npm run build`) as static
 files, so `chao.dashboard.window`'s native window (design doc §11.4) has a
 single self-contained URL to point at — no separate `npm run dev` process
 needed for normal/streaming use, only for frontend iteration.
+
+`/subtitles` is a second, unrelated static page also served from here
+(design doc §17's phase-2 subtitle overlay row) — an OBS Browser Source
+URL, stream-facing rather than streamer-only. It's a separate concern from
+the dashboard proper, just colocated because both are static pages riding
+the same already-running uvicorn server and the same `/ws/events` stream.
 """
 
 from __future__ import annotations
@@ -26,11 +32,13 @@ from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from chao.bus import Bus
 
 WEB_DIST = Path(__file__).parent / "web" / "dist"
+SUBTITLES_HTML = Path(__file__).parent / "subtitles.html"
 
 DASHBOARD_HOST = "127.0.0.1"
 DASHBOARD_PORT = 8765
@@ -62,9 +70,19 @@ def create_app(bus: Bus) -> FastAPI:
         finally:
             bus.unsubscribe(sub)
 
-    # Mounted last and at "/" so it doesn't shadow the websocket route
-    # above; Starlette matches explicit routes before catch-all mounts
-    # regardless of declaration order, but keeping the websocket first
+    @app.get("/subtitles")
+    async def subtitles() -> HTMLResponse:
+        # Stream-facing overlay (design doc §17's phase-2 row) — an OBS
+        # Browser Source URL, separate from the streamer-only dashboard
+        # mounted below. Plain static HTML/JS, no build step, so there's
+        # nothing to run alongside `chao` for it to work; reads the file
+        # fresh each request rather than caching it in memory, since it's
+        # tiny and this way editing it during setup doesn't need a restart.
+        return HTMLResponse(SUBTITLES_HTML.read_text())
+
+    # Mounted last and at "/" so it doesn't shadow the websocket/subtitles
+    # routes above; Starlette matches explicit routes before catch-all
+    # mounts regardless of declaration order, but keeping them first
     # documents the intent. Skipped gracefully if `npm run build` hasn't
     # been run yet — dev workflow (`npm run dev` on its own port) doesn't
     # need this at all.
