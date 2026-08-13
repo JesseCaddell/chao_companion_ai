@@ -27,14 +27,31 @@ class MotionConfig:
     # the real VTS instance (SESSION_STATE.md session 10) found a single
     # InjectParameterDataRequest round trip averages ~17ms, right at 60Hz's
     # 16.7ms budget with zero headroom for the concurrency lock (see
-    # outputs/vts.py) or scheduling jitter. 30Hz leaves ~2x headroom.
+    # outputs/vts.py) or scheduling jitter. 30Hz leaves ~2x headroom against
+    # a single writer -- no longer true once idle_drift.py's second,
+    # always-on writer shares the same lock-serialized connection (session
+    # 10 part 8); deadline pacing degrades gracefully under that
+    # contention rather than overrunning, but the comfortable headroom
+    # this comment used to claim is real only when idle drift is paced
+    # conservatively too. See config/chao.yaml's idle_drift.fps comment.
     fps: float = 30.0
     # Fixed reference, not per-sentence peak normalization -- a quiet
     # sentence should bob less than a loud one, not get stretched to fill
     # the same range every time. Tuning placeholder, not measured against
     # the real voice's typical RMS yet.
     reference_rms: float = 0.1
-    attack_s: float = 0.03
+    # 0.03 was live-confirmed to cause a real, if minor, artifact (session
+    # 10 part 7 user report: "some small jerks mid-sentence"). `advisor`'s
+    # diagnosis: at fps=30 (frame_dt~=0.033s) and the old attack_s=0.03,
+    # the one-pole attack coefficient is 1-exp(-dt/attack_s)~=0.63 -- a
+    # silence-to-loud onset closes ~63% of the gap in a single frame, and
+    # since InjectParameterDataRequest does not interpolate (unlike
+    # MoveModelRequest, confirmed session 9), that's a real snap on every
+    # onset after a pause, not smoothing. 0.10 drops the first-frame step
+    # to ~30% of the gap while still reaching ~90% within ~130ms -- still
+    # reads as responsive. Live-verify this actually reads as smoother,
+    # don't just trust the math.
+    attack_s: float = 0.10
     release_s: float = 0.15
     # Scaled to ChaoHeadBob's confirmed-bound range on ParamAngleY (-30..30
     # in VTS, see rigging_check_list.md item 4) -- amplitude is the peak

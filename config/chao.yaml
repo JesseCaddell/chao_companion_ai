@@ -32,12 +32,23 @@ motion:                    # §8.1 envelope-driven motion. See director/motion.p
                                 # (session 10) measured ~17ms per InjectParameterData
                                 # Request round trip, leaving zero headroom at 60Hz
                                 # once outputs/vts.py's concurrency lock is in the
-                                # picture. 30Hz leaves ~2x headroom.
+                                # picture. 30Hz leaves ~2x headroom against a single
+                                # writer -- idle_drift.fps below is a second, always-
+                                # on writer sharing the same connection, so that
+                                # headroom is shared, not free; deadline pacing
+                                # degrades gracefully under contention rather than
+                                # overrunning (see motion.py's MotionConfig.fps).
   reference_rms: 0.1           # fixed reference for normalization, not per-sentence
                                 # peak -- a quiet sentence should bob less than a
                                 # loud one. Tuning placeholder, not measured against
                                 # this voice's typical RMS yet.
-  attack_s: 0.03                # fast rise on increasing energy
+  attack_s: 0.10                 # was 0.03 -- live-confirmed too fast (session 10
+                                  # part 7: "some small jerks mid-sentence"). advisor's
+                                  # diagnosis: InjectParameterDataRequest doesn't
+                                  # interpolate, so a fast attack coefficient closing
+                                  # most of the gap in one frame is a real snap, not
+                                  # smoothing. 0.10 trades a little responsiveness for
+                                  # a visibly smaller first-frame step. Live-verify.
   release_s: 0.15               # slower decay, so it doesn't chatter between syllables
   amplitude: 25                 # peak parameter value at normalized energy 1.0 --
                                  # ChaoHeadBob's bound range is -30..30. Session 10:
@@ -47,3 +58,59 @@ motion:                    # §8.1 envelope-driven motion. See director/motion.p
                                  # not conservative. Bumped to 25, leaving a little
                                  # headroom under the ±30 hard limit rather than
                                  # pinning it exactly there.
+
+idle_drift:                # §10.1 micro tier / §10.2 non-periodic idle motion.
+                            # See director/idle_drift.py and
+                            # docs/rigging_check_list.md item 5. Drives
+                            # ChaoHeadTurn/ChaoHeadTilt only (turn/tilt), never
+                            # ChaoHeadBob -- leaves speech motion's bob axis
+                            # untouched so idle drift never fights it, no
+                            # "am I speaking" coordination needed.
+                            #
+                            # Session 10 part 8: first version used a
+                            # continuous Ornstein-Uhlenbeck noise process,
+                            # live-verified and rejected by the user --
+                            # InjectParameterDataRequest doesn't interpolate,
+                            # so every noise step was a real visual snap
+                            # ("micro jerks"). Redesigned as point-to-point:
+                            # hold at a target, ease to a new one, hold again.
+                            # User's explicit direction: "the drift can be
+                            # extreme... the more animated the more fun this
+                            # character becomes."
+  x_parameter_name: ChaoHeadTurn   # bound to ParamAngleX + ParamBodyAngleX
+  z_parameter_name: ChaoHeadTilt   # bound to ParamAngleZ + ParamBodyAngleZ
+  fps: 15                    # drives both the eased-move frame rate and the
+                              # resend heartbeat during a hold (VTS drops an
+                              # un-resent tracking parameter after ~1s).
+                              # Higher than a naive "cheap enough" rate would
+                              # suggest, on purpose -- a multi-second ease
+                              # across a wide range still has a smaller
+                              # per-frame delta than the old noise process
+                              # had at a much smaller range. Also an
+                              # always-on second writer sharing motion.py's
+                              # connection budget -- see MotionConfig.fps.
+  x_amplitude: 22             # target-selection bound, NOT a clamp on a
+                               # continuous process -- each new target's x is
+                               # drawn uniformly from [-x_amplitude, x_amplitude].
+  z_amplitude: 12             # smaller than x_amplitude deliberately (advisor):
+                               # tilt reads stronger per degree than turn on
+                               # most rigs, so an equally "extreme" z would
+                               # likely read as broken rather than expressive.
+  min_move_distance: 8        # a freshly-drawn target within this 2D distance
+                               # of the current position is rejected and
+                               # redrawn -- without this, an occasional
+                               # near-adjacent draw produces an ease that's
+                               # visually indistinguishable from an extra hold.
+  ease_min_s: 0.6               # duration range for one point-to-point glide --
+  ease_max_s: 1.5                # live-verified once at 1.5-4.0s ("best it has
+                                  # looked so far"), then sped up ~2.5x on the
+                                  # user's follow-up ask: idle read as visibly
+                                  # slower than the speech-driven bob, wanted
+                                  # closer in pace, not just a bigger range.
+  hold_min_s: 2.0               # duration range for holding at a target --
+  hold_max_s: 5.0                 # shortened alongside ease_s for the same
+                                   # "increase idle speed overall" ask, not
+                                   # just the glide itself.
+                            # All of the above are untuned starting points,
+                            # to be live-tuned by feel same as motion.amplitude
+                            # was -- not measured or derived values.

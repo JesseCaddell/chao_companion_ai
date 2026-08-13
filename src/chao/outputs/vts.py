@@ -20,6 +20,7 @@ import websockets
 
 from chao.director.aliveness import FlyConfig
 from chao.director.director import EmoteConfig
+from chao.director.idle_drift import IdleDrift
 from chao.events import Event, Kind
 
 logger = logging.getLogger(__name__)
@@ -396,6 +397,109 @@ class VTSMotionPlayer:
                 Event(
                     kind=Kind.ERROR,
                     payload={"component": "vts", "message": "motion injection failed"},
+                )
+            )
+            return False
+        return True
+
+
+@dataclass
+class VTSIdleDriftPlayer:
+    """Thin injection loop over `director/idle_drift.py`'s `IdleDrift`
+    state machine -- calls `idle_drift.tick()` each frame and injects
+    whatever it returns, for as long as `cancel` isn't set. All the
+    interesting behavior (hold/ease phases, target selection, easing
+    curve) lives in `IdleDrift`, kept pure/testable without I/O; this
+    class is only the VTS-facing shell, same split as `VTSMotionPlayer`
+    vs. `director/motion.py`'s `extract_envelope`.
+
+    Unlike `VTSMotionPlayer`, which plays one finite clip per sentence,
+    this runs for the lifetime of the VTS connection (started once in
+    `_run_vts_subscriber`, right alongside `_attach_motion`, per advisor
+    review: share the one lock-serialized client rather than open a second
+    connection).
+
+    Both axes (x=turn, z=tilt) are injected in a single
+    InjectParameterDataRequest per frame, not two separate calls -- halves
+    the connection load per tick versus one call per axis, which matters
+    since this is an *always-on* second writer sharing motion.py's
+    lock-serialized connection budget (see MotionConfig.fps's comment).
+
+    `faceFound: True`, matching `VTSMotionPlayer._inject` deliberately --
+    advisor flagged that two concurrent writers on the same connection
+    disagreeing on that field (vts_probe.py's throwaway diagnostic script
+    uses `False`) is a real last-writer-wins hazard worth avoiding
+    explicitly rather than leaving to chance.
+    """
+
+    client: VTSTransport
+    x_parameter_name: str
+    z_parameter_name: str
+    publish: Callable[[Event], None] = _default_publish
+    publish_every_n_frames: int = 6
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    clock: Callable[[], float] = time.monotonic
+
+    async def run(self, idle_drift: IdleDrift, *, cancel: asyncio.Event) -> None:
+        if cancel.is_set():
+            return
+        fps = idle_drift.config.fps
+        frame_dt = 1.0 / fps if fps > 0 else 0.0
+
+        start = self.clock()
+        i = 0
+        while not cancel.is_set():
+            x_value, z_value = idle_drift.tick()
+            if not await self._inject_both(x_value, z_value):
+                break  # failure already reported inside _inject_both
+            if i % self.publish_every_n_frames == 0:
+                self.publish(
+                    Event(
+                        kind=Kind.VTS_PARAM,
+                        payload={"name": self.x_parameter_name, "value": x_value},
+                    )
+                )
+                self.publish(
+                    Event(
+                        kind=Kind.VTS_PARAM,
+                        payload={"name": self.z_parameter_name, "value": z_value},
+                    )
+                )
+            i += 1
+            deadline = start + i * frame_dt
+            remaining = deadline - self.clock()
+            if remaining > 0:
+                await self.sleep(remaining)
+
+        # Ramp both axes to rest on every exit path, same reasoning as
+        # VTSMotionPlayer.play's trailing ramp -- an idle drift task that
+        # gets cancelled at shutdown mid-drift shouldn't leave the head
+        # parked off-center relying on VTS's own undefined-decay auto-drop.
+        await self._inject_both(0.0, 0.0)
+
+    async def _inject_both(self, x_value: float, z_value: float) -> bool:
+        try:
+            await self.client.request(
+                "InjectParameterDataRequest",
+                {
+                    "faceFound": True,
+                    "mode": "set",
+                    "parameterValues": [
+                        {"id": self.x_parameter_name, "value": x_value, "weight": 1},
+                        {"id": self.z_parameter_name, "value": z_value, "weight": 1},
+                    ],
+                },
+            )
+        except Exception:
+            logger.exception(
+                "VTS idle drift injection failed (parameters=%s, %s)",
+                self.x_parameter_name,
+                self.z_parameter_name,
+            )
+            self.publish(
+                Event(
+                    kind=Kind.ERROR,
+                    payload={"component": "vts", "message": "idle drift injection failed"},
                 )
             )
             return False

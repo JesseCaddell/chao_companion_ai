@@ -295,6 +295,20 @@ The ball is effectively a thought bubble. That is why the latency-cover problem 
 
 Selection rule: never fire the same hotkey twice consecutively where a pool exists. Weighted random, per-emote cooldowns. Repetition is the fastest way to break the illusion.
 
+**Note (session 10, logged for later, not built):** `[curious]`/
+`[thinking]`'s "head tilt" motion column was aspirational until now —
+no bound parameter existed to drive it, so `director.py`'s emote firing
+for these tags only ever moved the ball (question mark), never the head.
+`ChaoHeadTilt`/`ParamAngleZ` (rigging check-list item 5) makes this
+actually buildable: pairing a `ChaoHeadTilt` injection (left or right,
+picked per-fire the same way emote hotkeys already get chosen from a
+pool) with the existing question-mark ball emote would deliver the
+"thinking/questioning" expression this row always specified, not just
+approximate it with the ball alone. Left/right choice, hold duration, and
+whether it decays back to 0 on a timer or via the not-yet-built idle
+drift's own return-to-neutral are all still open — this is a flag that
+the blocker is gone, not a design.
+
 ### 6.3 Heart is gated on affinity
 
 Heart is not a mood expression — it is a **relationship** expression, and it is the mechanism that makes long-term growth visible on screen.
@@ -477,6 +491,27 @@ The chao holds a focus target: `streamer`, `chat`, `idle`, or `self`. Focus driv
 - Named in chat → snap to chat, `[curious]`
 
 A character visibly looking at something reads as attentive. A centred, still character reads as switched off, even while breathing.
+
+**Note (session 10, logged for later, not built):** §10.1's idle drift is
+now built (`director/idle_drift.py`'s `IdleDrift`, point-to-point
+head-turn/tilt motion, live-verified) and runs fully autonomously —
+picks its own targets, on its own timer, with no external input. The
+user's explicit ask, once the LLM is actually wired to chat/voice (phase
+4/5, not built yet): the chao should be able to **direct** where it looks
+"when it wants," not just run on an unattended script. This is the same
+arbitration question flagged in session 10 part 3, now sharpened by a
+real implementation to arbitrate against: `[look:chat]`/`[look:you]`
+already exist as LLM-emitted tags (`director.tag` telemetry, no consumer
+yet), and `IdleDrift` already owns a real (x, z) target/phase state
+machine that autonomous drift currently drives unconditionally. Whoever
+builds this needs to decide the actual arbitration shape — candidates,
+not a decision: a tag-driven look forces an immediate target + temporarily
+suspends autonomous redraws until it decays; `IdleDrift` gains a
+"requested target" input that preempts its own pick; or focus state
+lives one level up (a real `attention` component, per this section) and
+treats `IdleDrift` as just its idle-fallback renderer. Not attempted this
+session — no live chat/voice input exists to drive it with yet, so
+there's nothing real to test against.
 
 ### 10.4 Reactive silence
 

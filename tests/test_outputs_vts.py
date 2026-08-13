@@ -1,11 +1,18 @@
 import asyncio
+import random
 
 import pytest
 
 from chao.director.aliveness import FlyConfig
 from chao.director.director import EmoteConfig, EmotePool
+from chao.director.idle_drift import IdleDrift, IdleDriftConfig
 from chao.events import Event, Kind
-from chao.outputs.vts import VTSEmoteSubscriber, VTSFlySubscriber, VTSMotionPlayer
+from chao.outputs.vts import (
+    VTSEmoteSubscriber,
+    VTSFlySubscriber,
+    VTSIdleDriftPlayer,
+    VTSMotionPlayer,
+)
 
 
 class FakeVTSClient:
@@ -472,3 +479,195 @@ async def test_motion_player_injection_failure_stops_clip_and_publishes_error():
     errors = [e for e in events if e.kind == Kind.ERROR]
     assert len(errors) == 2
     assert all(e.payload["component"] == "vts" for e in errors)
+
+
+class ClockAdvancingCancelAfterN:
+    """Combines ClockAdvancingSleep's clock-advance with a bounded call
+    count -- lets an idle-drift test run exactly N frames of real (faked)
+    time progression, so IdleDrift actually moves through phase
+    transitions, then stops. Cancel is checked at the top of the while
+    loop, so setting it inside the Nth sleep call lets that frame finish
+    and stops before the (N+1)th.
+    """
+
+    def __init__(self, clock: FakeClock, cancel: asyncio.Event, n: int):
+        self.clock = clock
+        self.cancel = cancel
+        self.n = n
+        self.calls = 0
+
+    async def __call__(self, duration: float) -> None:
+        self.calls += 1
+        self.clock.advance(duration)
+        if self.calls >= self.n:
+            self.cancel.set()
+
+
+def idle_config(**overrides) -> IdleDriftConfig:
+    defaults = {
+        "x_parameter_name": "ChaoHeadTurn",
+        "z_parameter_name": "ChaoHeadTilt",
+        "fps": 10.0,
+        "x_amplitude": 22.0,
+        "z_amplitude": 12.0,
+        "min_move_distance": 8.0,
+        "ease_min_s": 0.5,
+        "ease_max_s": 0.5,
+        "hold_min_s": 0.5,
+        "hold_max_s": 0.5,
+    }
+    defaults.update(overrides)
+    return IdleDriftConfig(**defaults)
+
+
+def make_idle_drift(clock: FakeClock, seed: int) -> IdleDrift:
+    return IdleDrift(config=idle_config(), clock=clock, rng=random.Random(seed))
+
+
+async def test_idle_drift_noop_when_already_cancelled():
+    client = FakeVTSClient()
+    player = VTSIdleDriftPlayer(
+        client=client, x_parameter_name="ChaoHeadTurn", z_parameter_name="ChaoHeadTilt"
+    )
+    cancel = asyncio.Event()
+    cancel.set()
+
+    await player.run(make_idle_drift(FakeClock(), seed=1), cancel=cancel)
+
+    assert client.calls == []
+
+
+async def test_idle_drift_injects_both_axes_in_one_call_per_frame():
+    client = FakeVTSClient()
+    clock = FakeClock()
+    cancel = asyncio.Event()
+    player = VTSIdleDriftPlayer(
+        client=client,
+        x_parameter_name="ChaoHeadTurn",
+        z_parameter_name="ChaoHeadTilt",
+        clock=clock,
+        sleep=ClockAdvancingCancelAfterN(clock, cancel, n=3),
+    )
+
+    await player.run(make_idle_drift(clock, seed=1), cancel=cancel)
+
+    inject_calls_ = [c for c in client.calls if c[0] == "InjectParameterDataRequest"]
+    assert len(inject_calls_) == 4  # 3 frames + the trailing ramp-to-zero
+    for _mtype, data in inject_calls_:
+        ids = {pv["id"] for pv in data["parameterValues"]}
+        assert ids == {"ChaoHeadTurn", "ChaoHeadTilt"}  # both axes, one call
+
+
+async def test_idle_drift_uses_face_found_true():
+    """advisor flag: two concurrent writers on the same connection
+    disagreeing on faceFound (VTSMotionPlayer uses True; vts_probe.py's
+    throwaway diagnostic uses False) is a real last-writer-wins hazard.
+    Idle drift must match VTSMotionPlayer's True.
+    """
+    client = FakeVTSClient()
+    clock = FakeClock()
+    cancel = asyncio.Event()
+    player = VTSIdleDriftPlayer(
+        client=client,
+        x_parameter_name="ChaoHeadTurn",
+        z_parameter_name="ChaoHeadTilt",
+        clock=clock,
+        sleep=ClockAdvancingCancelAfterN(clock, cancel, n=1),
+    )
+
+    await player.run(make_idle_drift(clock, seed=1), cancel=cancel)
+
+    inject_calls_ = [c for c in client.calls if c[0] == "InjectParameterDataRequest"]
+    assert all(data["faceFound"] is True for _mtype, data in inject_calls_)
+
+
+async def test_idle_drift_ramps_both_axes_to_zero_on_exit():
+    client = FakeVTSClient()
+    clock = FakeClock()
+    cancel = asyncio.Event()
+    player = VTSIdleDriftPlayer(
+        client=client,
+        x_parameter_name="ChaoHeadTurn",
+        z_parameter_name="ChaoHeadTilt",
+        clock=clock,
+        sleep=ClockAdvancingCancelAfterN(clock, cancel, n=2),
+    )
+
+    await player.run(make_idle_drift(clock, seed=1), cancel=cancel)
+
+    inject_calls_ = [c for c in client.calls if c[0] == "InjectParameterDataRequest"]
+    last_values = {pv["id"]: pv["value"] for pv in inject_calls_[-1][1]["parameterValues"]}
+    assert last_values == {"ChaoHeadTurn": 0.0, "ChaoHeadTilt": 0.0}
+
+
+async def test_idle_drift_publishes_sampled_vts_param_events_for_both_axes():
+    client = FakeVTSClient()
+    clock = FakeClock()
+    cancel = asyncio.Event()
+    events: list[Event] = []
+    player = VTSIdleDriftPlayer(
+        client=client,
+        x_parameter_name="ChaoHeadTurn",
+        z_parameter_name="ChaoHeadTilt",
+        publish=events.append,
+        publish_every_n_frames=1,
+        clock=clock,
+        sleep=ClockAdvancingCancelAfterN(clock, cancel, n=2),
+    )
+
+    await player.run(make_idle_drift(clock, seed=1), cancel=cancel)
+
+    param_events = [e for e in events if e.kind == Kind.VTS_PARAM]
+    names = {e.payload["name"] for e in param_events}
+    assert names == {"ChaoHeadTurn", "ChaoHeadTilt"}
+
+
+async def test_idle_drift_injection_failure_stops_loop_and_publishes_error():
+    client = FakeVTSClient(fail_message_types={"InjectParameterDataRequest"})
+    clock = FakeClock()
+    cancel = asyncio.Event()
+    events: list[Event] = []
+    player = VTSIdleDriftPlayer(
+        client=client,
+        x_parameter_name="ChaoHeadTurn",
+        z_parameter_name="ChaoHeadTilt",
+        publish=events.append,
+        clock=clock,
+        sleep=ClockAdvancingSleep(clock),
+    )
+
+    await player.run(make_idle_drift(clock, seed=1), cancel=cancel)
+
+    # First injection fails -> loop breaks; the trailing ramp-to-zero also fails.
+    inject_calls_ = [c for c in client.calls if c[0] == "InjectParameterDataRequest"]
+    assert len(inject_calls_) == 2
+    errors = [e for e in events if e.kind == Kind.ERROR]
+    assert len(errors) == 2
+    assert all(e.payload["component"] == "vts" for e in errors)
+
+
+async def test_idle_drift_is_deterministic_given_a_seeded_rng():
+    async def run_and_collect(seed: int) -> list[dict]:
+        client = FakeVTSClient()
+        clock = FakeClock()
+        cancel = asyncio.Event()
+        player = VTSIdleDriftPlayer(
+            client=client,
+            x_parameter_name="ChaoHeadTurn",
+            z_parameter_name="ChaoHeadTilt",
+            clock=clock,
+            sleep=ClockAdvancingCancelAfterN(clock, cancel, n=10),
+        )
+        await player.run(make_idle_drift(clock, seed=seed), cancel=cancel)
+        return [
+            {pv["id"]: pv["value"] for pv in data["parameterValues"]}
+            for mtype, data in client.calls
+            if mtype == "InjectParameterDataRequest"
+        ]
+
+    values1 = await run_and_collect(99)
+    values2 = await run_and_collect(99)
+    values3 = await run_and_collect(1)
+
+    assert values1 == values2
+    assert values1 != values3

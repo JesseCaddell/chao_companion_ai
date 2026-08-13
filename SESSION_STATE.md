@@ -233,6 +233,122 @@ axes is the idle-drift work flagged as the likely next step before this
 detour (design doc §10.1/§10.2) — previously blocked on exactly this,
 now unblocked.
 
+### Session 10, part 8: idle drift (§10.1/§10.2) — built, rejected live, redesigned, locked in
+
+User picked idle drift as the next step (the two new head axes from part
+7 were built specifically to unblock it). Before writing code, called
+`advisor` with a design sketch; its four points all got addressed:
+X/Z-only (never `ChaoHeadBob`, sidesteps the "is the chao speaking"
+coordination problem entirely — confirmed the right call), a rate floor
+high enough to keep per-step deltas sub-perceptual, sharing the one
+lock-serialized VTS connection rather than opening a second, and a
+ramp-to-rest on every exit path.
+
+**`attack_s` fix, landed first, live-confirmed:** before idle drift
+itself, `advisor` diagnosed the "small jerks mid-sentence" finding
+flagged back in part 5's amplitude tuning: `InjectParameterDataRequest`
+doesn't interpolate, so `motion.py`'s old `attack_s: 0.03` closed ~63% of
+a silence-to-loud onset's gap in a single frame — a real snap, not
+smoothing. Raised to `0.10` (both `config/chao.yaml` and
+`MotionConfig`'s dataclass default). **User confirmed live, unprompted:**
+"the chao speak looks so good! Feels alive!" — signed off, not revisited
+further this session.
+
+**First idle drift version: a continuous Ornstein-Uhlenbeck noise
+process** (`director/idle_drift.py`'s `ou_step`/`clamp`, a
+`VTSIdleDriftPlayer.run` injecting both `ChaoHeadTurn`/`ChaoHeadTilt`
+together in one call per frame at 10Hz, `_attach_idle_drift` mirroring
+`_attach_motion`'s recreate-on-startup pattern). 17 new tests, full suite
+green, live-verified twice (idle alone, then idle + speech together) with
+zero errors on either run.
+
+**User's verdict, watching it live, was a real rejection, not a tuning
+note:** "the idle drift needs some work. Its micro jerks are noticeable
+and it doesn't look good." Root cause, in hindsight obvious:
+`InjectParameterDataRequest` doesn't interpolate (the same fact that
+drove the `attack_s` fix above), so *every* OU step, however small, was a
+real visible snap — continuous noise was fundamentally the wrong
+mechanism for a non-interpolating parameter, not a mistunable one.
+User's own replacement design: **"slow movement from point A to point B,
+not micro nudges... the drift can be extreme... the more animated the
+more fun this character becomes... it's a drawing and masterfully done
+art."**
+
+**Redesigned around that, `advisor`-reviewed again before writing code**
+(confirmed the read was right, then added specifics): `director/idle_drift.py`
+rewritten around a stateful `IdleDrift` class (same clock/rng-injection
+shape as `Fly`, deliberately — `tick()` reads `self.clock()` itself, no
+`now` parameter) implementing a two-phase state machine — hold at a
+target (genuinely static, the property the user actually asked for), ease
+to a freshly-drawn target via a hand-computed `smoothstep` curve (VTS
+won't interpolate this parameter, so the code does), hold again.
+`VTSIdleDriftPlayer` simplified to a thin shell calling `idle_drift.tick()`
+each frame, same split as `extract_envelope`/`VTSMotionPlayer`. `ou_step`/
+`clamp` and their tests deleted outright, not left around as dead code.
+
+Four specifics from the second advisor pass, all incorporated:
+- **Split `x_amplitude`/`z_amplitude`** (22/12), not one shared bound —
+  tilt reads stronger per degree than turn on most rigs; an unconstrained
+  random 2D target could land at extreme-tilt-plus-extreme-turn and read
+  as broken rather than expressive.
+- **`min_move_distance` (8.0) redraw** — without it, an occasional
+  near-adjacent target draw produces an ease indistinguishable from an
+  extra hold, a dead 10+ second stretch. Same latent issue as
+  `Fly._maybe_reposition`'s, worse here since point-to-point motion is
+  the primary behavior, not a rare event.
+- **Exact-target snap on late ticks** — a tick arriving well past the
+  ease's deadline (real jitter, or a test jumping the clock in one leap)
+  must land exactly on target, not extrapolate past it. Pinned by a
+  dedicated test that jumps the clock 50x past the ease duration in one
+  call and asserts the value is still exactly the target.
+- **`amplitude` is now a target-selection *bound*, not a clamp on a
+  continuous process** — different semantics from the field it replaced,
+  called out explicitly in both the code comment and `config/chao.yaml`
+  so a future reader doesn't assume otherwise.
+
+New tests replaced the old ones one-for-one in kind, not just in count:
+determinism checked across *several* phase transitions (target and
+duration draws interleave, so one transition wouldn't catch an ordering
+bug), hold-is-static checked via bit-identical repeated `tick()` values
+(the actual property being tested for), min-move-distance and amplitude
+bounds checked across 30 simulated transitions. One real test bug found
+and fixed along the way: repeatedly advancing a `FakeClock` by exactly
+`0.1` accumulated floating-point rounding error, occasionally landing
+`elapsed` just under the stored `phase_duration` and producing a spurious
+duplicate — fixed by advancing with clear margin (`0.15`) past each
+boundary instead of exactly at it. Full suite: 222 passed, ruff clean,
+format clean.
+
+**Live-verified, first pass at `ease_s=[1.5,4.0]`/`hold_s=[3.0,8.0]`,
+`x_amplitude=22`/`z_amplitude=12`:** ran idle alone for 45s (advisor:
+pacing failures only show up across multiple cycles, watch 3-4), then
+idle + speech together, then idle alone again post-speech — all three
+legs clean, no errors. **User: "wow. That is the best it has looked so
+far. Love it."**
+
+**Immediate follow-up ask, still live-tuning:** "the idle movements are
+significantly slower than the movements while chao is talking... build
+an allowance for increase of speed." Not a redesign — shortened
+`ease_s`/`hold_s` ranges roughly 2.5x (`[0.6,1.5]`/`[2.0,5.0]`), same
+amplitude/min-move-distance, in both `config/chao.yaml` and
+`IdleDriftConfig`'s dataclass defaults. Re-verified live (user asked for
+a second run after missing the first one mid-speech). **User: "BOOM!
+Looks great! lock it in!"** — final, no further tuning pending.
+
+**Second ask, logged not built:** the user wants the LLM (once wired to
+chat/voice, phase 4/5) to be able to direct where the chao looks "when it
+wants," not have idle drift run as a fully unattended script forever.
+This is the same arbitration question already flagged in part 3
+(`[look:chat]`/`[look:you]` tags vs. an aliveness-owned focus state), now
+sharpened by having a real `IdleDrift` state machine to arbitrate
+against. Logged as a design doc §10.3 note with three candidate
+arbitration shapes, no decision made — nothing real exists yet to drive
+it with (no live chat/voice input), so there's nothing to test against
+this session. See design doc §10.3.
+
+Not yet committed at time of writing — same per-part-commit discipline as
+the rest of this session.
+
 *(§8.1's implementation details — `director/motion.py`, `VTSMotionPlayer`,
 `Speaker`'s concurrent-motion path — are fully described in the "session
 10 part 5" stopping point above, which supersedes an earlier, more

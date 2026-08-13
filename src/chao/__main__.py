@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 from collections.abc import Callable
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from chao.bus import Bus
 from chao.dashboard.server import DASHBOARD_HOST, DASHBOARD_PORT, create_app
 from chao.director.aliveness import Aliveness, Fly, FlyConfig, load_fly_config
 from chao.director.director import Director, EmoteConfig, load_emote_config
+from chao.director.idle_drift import IdleDrift, IdleDriftConfig, load_idle_drift_config
 from chao.director.mood import Mood, MoodConfig, load_mood_config
 from chao.director.motion import MotionConfig, load_motion_config
 from chao.events import Event, Kind
@@ -43,6 +45,7 @@ from chao.outputs.vts import (
     VTSClient,
     VTSEmoteSubscriber,
     VTSFlySubscriber,
+    VTSIdleDriftPlayer,
     VTSMotionPlayer,
 )
 
@@ -129,6 +132,7 @@ async def _run_vts_subscriber(
     fly_config: FlyConfig,
     speaker: Speaker | None,
     motion_config: MotionConfig,
+    idle_drift_config: IdleDriftConfig,
 ) -> None:
     """Connects to VTS and turns `director.emote`/`state.fly` events into
     real VTS API calls, over the one shared connection (both subscribers
@@ -161,6 +165,25 @@ async def _run_vts_subscriber(
     if speaker is not None:
         await _attach_motion(client, speaker, motion_config, bus.publish)
 
+    # Idle drift (§10.1/§10.2) runs for the lifetime of this connection,
+    # not per-turn like motion/emotes -- started here (advisor-reviewed:
+    # share the one lock-serialized client rather than open a second
+    # connection) and cancelled in the `finally` below alongside
+    # client.close(). Independent of TTS -- the chao should idle-sway even
+    # if `speaker` is None, unlike `_attach_motion` above.
+    await _attach_idle_drift(client, idle_drift_config)
+    idle_drift_cancel = asyncio.Event()
+    idle_drift = IdleDrift(config=idle_drift_config, rng=random.Random())
+    idle_drift_player = VTSIdleDriftPlayer(
+        client=client,
+        x_parameter_name=idle_drift_config.x_parameter_name,
+        z_parameter_name=idle_drift_config.z_parameter_name,
+        publish=bus.publish,
+    )
+    idle_drift_task = asyncio.create_task(
+        idle_drift_player.run(idle_drift, cancel=idle_drift_cancel)
+    )
+
     emote_subscriber = VTSEmoteSubscriber(
         client=client, emote_config=emote_config, publish=bus.publish
     )
@@ -171,6 +194,8 @@ async def _run_vts_subscriber(
             await emote_subscriber.handle(event)
             await fly_subscriber.handle(event)
     finally:
+        idle_drift_cancel.set()
+        await idle_drift_task
         await client.close()
 
 
@@ -220,6 +245,40 @@ async def _attach_motion(
     speaker.motion = VTSMotionPlayer(
         client=client, parameter_name=motion_config.parameter_name, publish=publish
     )
+
+
+async def _attach_idle_drift(client: VTSClient, idle_drift_config: IdleDriftConfig) -> None:
+    """Same "recreate on every startup, tolerate already-exists" reasoning
+    as `_attach_motion` above, for idle drift's two parameters
+    (`ChaoHeadTurn`/`ChaoHeadTilt`) -- the parameters are plugin-created
+    and may not survive a VTS restart even though their bindings
+    (docs/rigging_check_list.md item 5) do.
+
+    Unlike `_attach_motion`, there's nothing to skip attaching on failure
+    -- idle drift isn't gated behind another component existing first
+    (`speaker` can be `None`; idle drift runs regardless). A connection
+    failure here degrades the same way a failure inside
+    `VTSIdleDriftPlayer.run` itself already does: the first real injection
+    attempt fails, it reports a `Kind.ERROR` and stops, and the chao just
+    doesn't idle-sway for that VTS session -- no separate abort path
+    needed.
+    """
+    for name in (idle_drift_config.x_parameter_name, idle_drift_config.z_parameter_name):
+        try:
+            await client.request(
+                "ParameterCreationRequest",
+                {
+                    "parameterName": name,
+                    "explanation": "chao idle drift (design doc §10.1/§10.2)",
+                    "min": idle_drift_config.param_min,
+                    "max": idle_drift_config.param_max,
+                    "defaultValue": 0,
+                },
+            )
+        except VTSAPIError as e:
+            print(f"  (ParameterCreationRequest for {name}: {e})")
+        except (OSError, RuntimeError) as e:
+            print(f"  (couldn't set up idle drift parameter {name}: {e})")
 
 
 async def _run_aliveness(bus: Bus, emote_config: EmoteConfig) -> None:
@@ -295,6 +354,7 @@ async def main() -> None:
     fly_config = load_fly_config(EMOTES_PATH)
     tts_config = load_tts_config(CHAO_CONFIG_PATH)
     motion_config = load_motion_config(CHAO_CONFIG_PATH)
+    idle_drift_config = load_idle_drift_config(CHAO_CONFIG_PATH)
 
     cloud = AnthropicBackend()  # reads ANTHROPIC_API_KEY from the environment
     local = OllamaBackend(os.environ.get("CHAO_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL))
@@ -309,7 +369,9 @@ async def main() -> None:
     error_task = asyncio.create_task(_print_errors(bus.subscribe()))
     dashboard_task = asyncio.create_task(_run_dashboard_server(bus))
     vts_task = asyncio.create_task(
-        _run_vts_subscriber(bus, emote_config, fly_config, speaker, motion_config)
+        _run_vts_subscriber(
+            bus, emote_config, fly_config, speaker, motion_config, idle_drift_config
+        )
     )
     aliveness_task = asyncio.create_task(_run_aliveness(bus, emote_config))
     mood_task = asyncio.create_task(_run_mood(bus, mood_config))
