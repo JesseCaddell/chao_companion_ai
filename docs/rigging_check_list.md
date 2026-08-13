@@ -77,3 +77,65 @@ the asymmetry versus item 2's `x_range`, which is confirmed relative to
 the model's *natural resting position*, not a centered one — a future
 fly-Y implementation should decide deliberately which reference point it
 uses rather than assuming they match.
+
+### 4. §8.1 body bob / head nod parameter — one signal, not two
+
+**Needed for:** §8.1 envelope-driven motion (RMS@60Hz → visible
+movement), the last unbuilt piece of phase 2.
+
+**Finding, in two parts:**
+
+- **`ParamBodyAngleX/Y/Z` are inert in this model's art.** Created a
+  custom tracking parameter, bound it to `ParamBodyAngleY` ("Body
+  Rotation Y") in the VTS UI, and injected ±10 (its full range) while
+  reading `Live2DParameterListRequest` back — the raw parameter value
+  updated correctly both times (confirmed twice: once with
+  `faceFound: false`, once `faceFound: true`, ruling out a
+  tracking-confidence gating explanation), but **zero visible motion on
+  the model**, either time. Same category of finding as item 1's original
+  ball investigation (a parameter that exists and takes a value but isn't
+  wired to any deformation in the actual art).
+- **The apparent "head vs. body" naming confusion wasn't a naming
+  problem.** The user found VTS's tracking-parameter mapping: `FaceAngleY`
+  (one input) drives *two* independent outputs simultaneously — `ParamAngleY`
+  ("Face up/down rotation") and `ParamBodyAngleY` ("Body Rotation Y"). Live
+  face tracking moves both at once, which reads as "the whole character
+  bobbing" — but that's `ParamAngleY` doing the visible work; the
+  simultaneously-updating `ParamBodyAngleY` has no visual effect on its own
+  (consistent with the first finding above). **User's real-world
+  observation, confirmed by a second injection test:** binding a custom
+  param to `ParamAngleY` alone and injecting ±30 (its full range) produced
+  visible movement of **both head and body together** — this character's
+  proportions mean the body already visually follows the head, with no
+  separate body-only channel needed or available.
+
+**Real design implication:** §8.1 as originally spec'd routes two
+independent outputs (body bob, head nod) from one envelope signal. On
+this rig, **that should collapse to one output** — drive `ParamAngleY`
+alone; the body follows automatically as a consequence of the art, not
+because code drives it separately. `ParamBodyAngleX/Y/Z` need no binding
+and no code attention unless the rigger later adds real body-specific
+deformation to them.
+
+**Left in a ready-to-use state, not cleaned up:** unlike the earlier
+throwaway test parameters in items 1-3 (created, tested, deleted), the
+custom parameter from the *second* test — `ChaoHeadBob`, bound to
+`ParamAngleY` — was deliberately **left bound in VTS** rather than
+deleted, since it's now the real, confirmed-working setup §8.1's
+implementation can inject into directly. No VTS-side setup should be
+needed before that code gets written, only picking a final parameter name
+if `ChaoHeadBob` isn't it.
+
+**Also noted, not yet investigated:** injected values snapped directly
+between test points ("very jerky," per the user) — expected, since the
+test used two-value discrete steps (`InjectParameterDataRequest` with
+`mode: "set"`), not §8.1's actual planned envelope (continuous ~60Hz
+values with attack/release smoothing already baked into the signal before
+injection). Not re-tested with a smoothed signal; the jerkiness is
+attributed to the test method, not the parameter/binding, but that's an
+assumption a real §8.1 implementation should confirm rather than inherit
+unverified.
+
+**Status:** Resolved. Head/body bob has a confirmed, live-tested,
+bound parameter ready for §8.1 to drive; body-only movement does not
+exist in this rig and isn't needed given the finding above.

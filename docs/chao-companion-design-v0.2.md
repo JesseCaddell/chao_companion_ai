@@ -390,6 +390,17 @@ Routed to:
 - **Head nod** — small pitch impulses on envelope peaks (syllable stress proxy)
 - **Ball bounce** — via the spring below
 
+**Update (session 10):** body bob and head nod collapse to **one** output
+parameter on this rig, not two. `docs/rigging_check_list.md` item 4:
+`ParamBodyAngleX/Y/Z` exist but are confirmed inert (take a value, produce
+no visible motion); `ParamAngleY` alone, live-tested, visibly moves both
+head *and* body together — this character's proportions mean the body
+already follows the head in the art, so there's no separate body-only
+channel to drive. A custom tracking parameter (`ChaoHeadBob`) is already
+created and bound to `ParamAngleY` in VTS, ready for this section's
+implementation to inject into directly — no further rig-side setup should
+be needed, only picking a final parameter name if `ChaoHeadBob` isn't it.
+
 ### 8.2 Ball spring (highest-value single feature)
 
 **Update:** the rigger added a dedicated physics group for the ball (`xp4`/`yp5`) with the lag below baked in natively — confirmed live in VTS. The pseudocode is kept here as the *behavioral spec* the rig now satisfies, not code we still need to write:

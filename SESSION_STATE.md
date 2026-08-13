@@ -279,7 +279,65 @@ in case a future live check needs generous timing margins again, not
 worth chasing further since the behavior itself was still caught cleanly
 on-screen.
 
-Not yet committed.
+Committed (`30df346`).
+
+### Session 10, part 4: §8.1's motion parameter — confirmed live, and a real design collapse
+
+User asked to bind the body-bob VTS parameter next, continuing straight
+into phase 2's last unbuilt piece (§8.1 envelope-driven motion) now that
+the subtitle overlay closed out the item before it. Same create → bind →
+inject procedure as `vts_probe.py`'s existing `happy` test, run live
+against the real rig, not a new permanent tool.
+
+- **`Live2DParameterListRequest` dump** surfaced real candidates:
+  `ParamBodyAngleX/Y/Z` (standard Live2D body-rotation params, range
+  ±10) — distinct from the ball's `xp4`/`yp5`/`yp6` group and
+  `ParamBreath` (VTS's own native idle breathing, already confirmed not
+  ours to drive, session 9).
+- **First test, `ParamBodyAngleY`: created a custom parameter, user bound
+  it, injected ±10.** Read back via `Live2DParameterListRequest` — the
+  raw value updated correctly both times. **User reported zero visible
+  motion**, confirmed twice (once with `faceFound: false`, once
+  `faceFound: true`, ruling out a tracking-confidence-gating
+  explanation). A real negative finding, not a test bug — same category
+  as session 3's original dead ball-position candidates.
+- **User's own diagnostic broke the case open:** checked VTS's tracking-
+  parameter mapping directly and found `FaceAngleY` (one tracking input)
+  fans out to *two* outputs at once — `ParamAngleY` ("Face up/down
+  rotation", head) and `ParamBodyAngleY` ("Body Rotation Y"). Live face
+  tracking moves both simultaneously, which reads as "the whole character
+  bobbing" but is actually `ParamAngleY` doing the visible work — exactly
+  consistent with the first test's finding that `ParamBodyAngleY` alone
+  has no visual effect.
+- **Second test, `ParamAngleY` alone: created a second custom parameter
+  (`ChaoHeadBob`), user bound it, injected ±30 (full range).** User
+  confirmed real visible motion — "right on the money" — of **both head
+  and body together**, from one signal.
+- **Real design implication, not just a rigging note:** §8.1 as originally
+  spec'd routes two independent outputs (body bob, head nod) from one
+  envelope. On this rig that collapses to **one** — this character's
+  proportions mean the body already visually follows the head in the art,
+  with no separate body-only channel to drive (`ParamBodyAngleX/Y/Z` need
+  no binding, no code attention, unless the rigger adds real body
+  deformation to them later). Design doc §8.1 updated with a session-10
+  note; `docs/rigging_check_list.md` gets a new item 4 with the full
+  writeup, including the two-step reasoning chain so a future reader
+  doesn't have to rediscover it.
+- **`ChaoHeadBob` deliberately left bound in VTS, not cleaned up** —
+  unlike every other throwaway test parameter this session (created,
+  tested, deleted), this one is the real, confirmed-working setup §8.1's
+  actual implementation can inject into directly. No further VTS-side
+  setup should be needed before that code gets written.
+- **Noted, not chased further:** injections in both tests snapped directly
+  between two discrete values ("very jerky," per the user) — expected,
+  since the test used `mode: "set"` two-point steps, not §8.1's actual
+  planned continuous ~60Hz envelope with attack/release smoothing already
+  baked in before injection. Attributed to the test method, not the
+  parameter/binding, but flagged as an assumption a real implementation
+  should confirm rather than inherit unverified.
+
+Not yet committed (`docs/rigging_check_list.md` item 4, the §8.1 design
+doc update, this note).
 
 ## Stopping point (end of session 9, 2026-08-11)
 
