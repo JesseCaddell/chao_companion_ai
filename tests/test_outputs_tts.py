@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 
-from chao.outputs.tts import AudioChunk, PiperBackend
+from chao.outputs.tts import AudioChunk, PiperBackend, _fix_pronunciation
 
 
 class FakePiperChunk:
@@ -68,3 +68,36 @@ async def test_loads_the_voice_lazily_and_only_once():
 
     assert backend._load_voice() is voice
     assert backend._load_voice() is voice
+
+
+def test_fix_pronunciation_rewrites_chao_to_chow():
+    assert _fix_pronunciation("chao is happy") == "chow is happy"
+
+
+def test_fix_pronunciation_rewrites_the_possessive():
+    assert _fix_pronunciation("chao's ball") == "chow's ball"
+
+
+def test_fix_pronunciation_preserves_capitalization():
+    assert _fix_pronunciation("Chao waved") == "Chow waved"
+
+
+def test_fix_pronunciation_leaves_unrelated_words_alone():
+    assert _fix_pronunciation("hello there") == "hello there"
+
+
+def test_fix_pronunciation_does_not_touch_chaos():
+    assert _fix_pronunciation("total chaos") == "total chaos"
+
+
+def test_fix_pronunciation_handles_a_quoted_word():
+    assert _fix_pronunciation("say 'chao' now") == "say 'chow' now"
+
+
+async def test_synthesize_applies_the_pronunciation_fix_before_calling_the_voice():
+    voice = FakeVoice([FakePiperChunk(np.array([0.0], dtype=np.float32), 22050)])
+    backend = PiperBackend(Path("unused.onnx"), voice=voice)
+
+    [_ async for _ in backend.synthesize("chao is here")]
+
+    assert voice.calls == ["chow is here"]

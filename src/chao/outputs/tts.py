@@ -14,12 +14,43 @@ to keep running while a sentence renders.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 import numpy as np
+
+# Piper doesn't decide pronunciation -- text is phonemized by espeak-ng
+# before the model ever sees it, so mispronunciations have to be fixed in
+# the text, not the model. TTS path only: callers must keep the original
+# spelling for history/memory/the dashboard, or the fix leaks into retrieved
+# context and becomes self-reinforcing. See docs/tts_pronunciation_overrides.md.
+_PRONUNCIATION = {
+    "chao": "chow",
+    "chao's": "chow's",
+}
+
+# Letters only, with an apostrophe allowed *between* letters (contractions/
+# possessives like "chao's") -- not at the edges, so a quoted 'chao' doesn't
+# sweep the closing quote into the match and silently miss the dict lookup.
+_WORD_PATTERN = re.compile(r"\b[A-Za-z]+(?:'[A-Za-z]+)?\b")
+
+
+def _fix_pronunciation(text: str) -> str:
+    """Rewrite words espeak-ng mispronounces. Call this only on text about to
+    be spoken -- never on anything that gets stored or fed back to the LLM.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        word = match.group(0)
+        fixed = _PRONUNCIATION.get(word.lower())
+        if fixed is None:
+            return word
+        return fixed.capitalize() if word[0].isupper() else fixed
+
+    return _WORD_PATTERN.sub(replace, text)
 
 
 @dataclass(frozen=True)
@@ -58,7 +89,7 @@ class PiperBackend:
 
     async def synthesize(self, text: str) -> AsyncIterator[AudioChunk]:
         loop = asyncio.get_running_loop()
-        chunks = await loop.run_in_executor(None, self._synthesize_sync, text)
+        chunks = await loop.run_in_executor(None, self._synthesize_sync, _fix_pronunciation(text))
         for chunk in chunks:
             yield AudioChunk(samples=chunk.audio_float_array, sample_rate=chunk.sample_rate)
 
