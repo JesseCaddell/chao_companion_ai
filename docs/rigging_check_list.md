@@ -139,3 +139,61 @@ unverified.
 **Status:** Resolved. Head/body bob has a confirmed, live-tested,
 bound parameter ready for §8.1 to drive; body-only movement does not
 exist in this rig and isn't needed given the finding above.
+
+**Superseded by item 5 below, partially:** item 5 reinstates a body-angle
+binding after all, but as a second *output curve* on the same custom
+parameter (replicating the rigger's original design) rather than a
+separate body-only parameter or a claim that the body needs its own
+channel. The "no separate body-*only* channel needed" conclusion above
+still holds — nothing here drives the body independently of the head.
+Item 5 is about matching the rigger's intended fan-out shape (one input,
+two simultaneous outputs), not about the body being independently
+drivable.
+
+### 5. Head/body dual-output binding — `ParamAngleX/Y/Z` + `ParamBodyAngleX/Y/Z` together
+
+**Needed for:** future features that use more than one motion axis (idle
+drift's §10.1/§10.2 non-periodic idle motion, and eventually the
+attention model's look direction) — item 4 only established the vertical
+(Y) axis; this generalizes the pattern to X (turn) and Z (tilt) and
+formalizes the pairing with the body outputs.
+
+**User's own finding, from the live model's tracking-parameter mapping,
+that reframed item 4's conclusion:** the rigger's original design has
+each `FaceAngle*` tracking input fan out to *two* simultaneous outputs —
+e.g. `FaceAngleX` → both `Face Left/Right Rotation` (`ParamAngleX`) *and*
+`Body Rotation X` (`ParamBodyAngleX`), same input driving both. Item 4
+had only tested `ParamBodyAngleY` in isolation (a separate custom
+parameter bound to *only* that output) and found no visible motion,
+concluding the body needed no channel of its own — true in isolation, but
+not the shape of the rigger's actual design, which always drives head and
+body together off one input.
+
+**Confirmed live:** a single plugin-created custom parameter can be bound
+to two output curves at once in VTS's UI, the same way a native tracking
+input can — this isn't limited to real tracking inputs. Three custom
+parameters now exist, each bound to both a head and a body output:
+
+| Custom parameter | Output 1 | Output 2 |
+|---|---|---|
+| `ChaoHeadBob` (existing, second output added) | `ParamAngleY` | `ParamBodyAngleY` |
+| `ChaoHeadTurn` (new) | `ParamAngleX` | `ParamBodyAngleX` |
+| `ChaoHeadTilt` (new) | `ParamAngleZ` | `ParamBodyAngleZ` |
+
+Live-tested via a scratch hold script (same `InjectParameterDataRequest`
+resend-every-0.3s pattern as `vts_probe.py`'s `hold_parameter`): all three
+parameters injected at both +25 and -25 (of their ±30 head-axis range).
+User confirmed all six holds — "resounding success." Three redundant
+body-only parameters (`ChaoBodyBob`/`ChaoBodyTurn`/`ChaoBodyTilt`),
+created before the dual-output capability was confirmed, were deleted as
+unnecessary.
+
+**Status:** Resolved. `ChaoHeadTurn` and `ChaoHeadTilt` are new,
+confirmed-working, ready-to-use parameters (same "left bound, not
+cleaned up" treatment as `ChaoHeadBob` in item 4) for whenever driving
+code needs a horizontal-turn or tilt axis — nothing drives them yet.
+`ChaoHeadBob`'s existing driver (`director/motion.py`'s
+`VTSMotionPlayer`, §8.1) needs no code change: it still injects one
+named parameter exactly as before, and now gets the body-following
+output as a direct binding rather than only as an incidental side effect
+of the art.

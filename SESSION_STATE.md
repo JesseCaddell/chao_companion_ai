@@ -117,118 +117,128 @@ wiring:
   only the event-feed panel so far (§11.2 item 3), and this needs that
   override panel to exist first.
 
-**Environment note, raised by the user, not yet acted on:** `uv run` is
-broken machine-wide (`uv trampoline failed to canonicalize script path`);
-worked around all session by calling `.venv\Scripts\python.exe -m pytest`
-/ `-m ruff` directly, which works fine (`.venv`'s own interpreter is
-Python 3.14.7, matching `pyproject.toml`'s `requires-python = ">=3.11"`).
-Separately, plain `python`/`python --version` on this machine's PATH
-resolves to a **Python 3.10.11** Windows Store alias, not the project's
-`.venv` — the user mentioned they moved a *separate* environment (used for
-Piper voice training, referenced a `shift_voice.py` tool in earlier
-sessions, outside this repo) down to Python 3.10, and is unsure whether
-that was a global change or scoped to that other environment. **Not
-investigated yet** — the user asked to address and tidy up the
-environment after this session's live check, which is now done. Next
-session (or later this one, if there's time): check whether the 3.10
-PATH entry is new/related to the Piper-training move, and whether it
-explains the `uv run` trampoline breakage, before deciding whether
-`uv sync` or a PATH fix is the right remedy.
+**Committed** (`08215e4`) once the suite/lint/live-check/tuning above were
+all done, per this project's established per-part-commit discipline
+(visible in recent git log — `71d5854`, `30df346`, `d6be08c` are each one
+part of this same session). `data/voices/` stayed untracked/uncommitted,
+same as every session that's touched it — gitignored voice model assets,
+not source.
 
-**Not yet committed.** `git status` shows `director/motion.py` (new),
-modified `outputs/vts.py`/`outputs/speech.py`/`__main__.py`/
-`config/chao.yaml`, the design doc's new session-10 note, this writeup,
-and the three new/modified test files. Per this project's established
-per-part-commit discipline (visible in recent git log — `71d5854`,
-`30df346`, `d6be08c` are each one part of this same session), this is
-ready to land as its own commit once the user confirms.
+### Session 10, part 6: `uv run` trampoline fix
 
-**Built, not yet tested or committed:**
-- `director/motion.py` (new) — `MotionConfig`/`load_motion_config` +
-  `extract_envelope(samples, sample_rate, config)`: pure function, RMS per
-  `1/fps`-sized block, normalized against a **fixed** `reference_rms`
-  (not per-sentence peak — a quiet sentence should bob less than a loud
-  one), clamped [0,1], one-pole attack/release smoothing (short attack,
-  longer release per §8.1), scaled by `amplitude`. No I/O in the core
-  function; `load_motion_config` reads `config/chao.yaml`'s new `motion:`
-  block, same split as `mood.py`.
-  - **Real finding baked into the default config, not guessed:** a live
-    round-trip measurement of `InjectParameterDataRequest` averaged
-    ~17ms/call (100 sequential calls, real VTS) — right at 60Hz's 16.7ms
-    budget with zero headroom. Default `fps` is **30**, not §8.1's nominal
-    60, documented inline with the measurement.
-  - One motion channel, not two — `docs/rigging_check_list.md` item 4
-    established body bob and head nod collapse to one signal on this rig.
-- `outputs/vts.py` — **`VTSClient.request()` now holds an `asyncio.Lock`
-  around send/recv.** This was `advisor`'s flagged blocker: send-then-recv
-  has no `requestID` correlation, and was only safe before because
-  `_run_vts_subscriber` drove everything sequentially in one loop. A 60Hz-
-  ish motion loop running concurrently with emote/fly handling on the same
-  connection would interleave responses without this. **Also added:**
-  `VTSMotionPlayer` — plays an envelope into VTS at a fixed rate,
-  cancellable per-frame (checks `cancel` between injections, not a bulk
-  sleep), ramps explicitly to 0.0 on every exit path (finished, cancelled,
-  or mid-clip failure) rather than relying on VTS's own ~1s undefined-decay
-  auto-drop, reports failures via `Kind.ERROR` and stops that clip's motion
-  without raising, publishes `Kind.VTS_PARAM` sampled every 6th frame (not
-  every frame — design doc §13 says "sampled, not every frame"). `sleep` is
-  an injectable field (matches `VTSEmoteSubscriber`'s existing pattern) so
-  tests won't need to wait in real time — **but no tests were written yet.**
-- `outputs/speech.py` — `Speaker` gained `motion: VTSMotionPlayer | None`
-  (mutable, set post-construction — same reason `orchestrator.speaker` is:
-  a real `VTSMotionPlayer` needs a connected `VTSClient`, which doesn't
-  exist yet when `_build_speaker` runs synchronously in `main()`) and
-  `motion_config`. `speak()` now runs audio playback and motion injection
-  **concurrently** via `asyncio.gather(..., return_exceptions=True)`,
-  re-raising only the audio task's exception — a motion/VTS failure must
-  never kill audio (mirrors `_drain_speech`'s "a speech failure doesn't
-  crash an otherwise-fine turn" lesson from earlier this session).
-  `completed`/`speech_end` still driven by audio alone.
-- `config/chao.yaml` — new `motion:` block: `parameter_name: ChaoHeadBob`,
-  `fps: 30`, `reference_rms: 0.1` (untuned placeholder), `attack_s: 0.03`,
-  `release_s: 0.15`, `amplitude: 15` (half of `ChaoHeadBob`'s bound ±30
-  range — conservative, untested starting point), `param_min`/`param_max:
-  -30/30` (must match the VTS-side bind, used only when recreating the
-  parameter).
-- `__main__.py` — `_attach_motion(client, speaker, motion_config, publish)`
-  (new): re-issues `ParameterCreationRequest` for `ChaoHeadBob` on every
-  startup (tolerates "already exists" via `VTSAPIError`) since the
-  *parameter* is plugin-created and may not survive a VTS restart even
-  though the *binding* (done once, by hand, in the VTS UI) does. Called
-  from `_run_vts_subscriber` right after connect succeeds, only if a
-  `Speaker` exists. **Documented, unverified risk:** if
-  `motion_config.parameter_name` doesn't match what's actually bound in
-  VTS, injection sends real successful requests into nothing — no error,
-  no motion, no signal anywhere that it's wrong.
+Machine-wide since sometime this session: every documented CLAUDE.md
+command that goes through a generated console-script shim
+(`uv run pytest`, `uv run ruff ...`, and the raw `.venv\Scripts\*.exe`
+files themselves) failed with `error: uv trampoline failed to canonicalize
+script path`. Worked around all of the above sessions by calling
+`.venv\Scripts\python.exe -m pytest` / `-m ruff` directly (which always
+worked fine — `.venv`'s own interpreter is real and healthy, Python
+3.14.7, matching `pyproject.toml`'s `requires-python = ">=3.11"`). User
+flagged wanting this tidied up, with one hard constraint: whatever the fix
+was, it must not touch the separate Piper voice-training environment/
+Python install elsewhere on the machine.
 
-**Explicitly not done yet:**
-- No tests for `director/motion.py`, the `VTSMotionPlayer` additions to
-  `outputs/vts.py`, or `Speaker`'s concurrent-motion path in
-  `outputs/speech.py`.
-- Full suite was **not re-run** after the last edit (two `ruff` B008 fixes
-  — mutable-default-arg lint errors on `MotionConfig()` defaults in
-  `motion.py` and `speech.py`, fixed by switching to `config: MotionConfig
-  | None = None` + `config = config or MotionConfig()`). Last confirmed
-  green run was 181 passed, *before* those two fixes and before this
-  feature's code existed at all — treat current code as unverified.
-- No live check against real VTS (the smoothed-envelope version should
-  finally resolve `rigging_check_list.md` item 4's "very jerky" caveat
-  from the raw two-point snap test, but that's unconfirmed).
-- `advisor`'s other two flags (`ChaoHeadBob` recreate-on-startup,
-  fixed-vs-peak normalization) were addressed in code but **not verified
-  live** — only reasoned through.
-- §8.3 arousal-scaled amplitude deliberately deferred, per `advisor`:
-  `Speaker` has no mood access; fixed amplitude first, confirm it reads
-  right on screen, modulate later.
-- Nothing in this part is committed. `git status` will show
-  `director/motion.py` (new), plus modified `outputs/vts.py`,
-  `outputs/speech.py`, `__main__.py`, `config/chao.yaml`.
+**Root cause narrowed, not fully proven:** `uv run python --version`
+worked the whole time — so `uv run` itself and the venv's real interpreter
+were never broken, only the small (46080-byte) trampoline stub `.exe`s uv
+generates per console-script entry point. Isolated further: trampolines
+from the *original* `uv sync` (8/7 batch — `pytest.exe`, `dotenv.exe`,
+`py.test.exe`, etc.) were **all** broken; trampolines generated later, when
+`piper-tts` was added on 8/11 (`piper.exe`, `onnxruntime_test.exe`), **all**
+worked fine, tested directly. Ruled out a `uv` version change as the cause
+— only one `uv` version (0.12.2) has ever been installed via scoop on this
+machine, and the interpreter directory the venv's `pyvenv.cfg` points at
+(`cpython-3.14.7-windows-x86_64-none`) hasn't been touched since the
+initial 8/7 sync either. So the breakage isn't "uv itself changed" or "the
+interpreter moved" — something invalidated that first batch of shim files
+specifically, sometime after they were created, while later-created ones
+were unaffected. Best guess, unconfirmed: AV/backup software rewriting
+those particular files post-creation is the usual culprit for this class
+of Windows-specific uv issue. Not chased further since the fix below is
+cheap, verified, and doesn't depend on knowing the exact trigger.
 
-**Next session, in order:** re-run `uv run pytest` and `ruff check` cold
-before touching anything else (don't trust this writeup's code
-descriptions until the suite actually confirms them); write the missing
-tests; only then attempt a live check; commit once live-verified, same
-discipline as every other feature this session.
+**Fix:** `uv sync --reinstall`, run from this project's directory only.
+Forces uv to reinstall all 49 packages into **this project's own `.venv`**,
+regenerating every trampoline from scratch. Verified this satisfies the
+user's constraint before running anything: it only writes inside
+`D:\PycharmProjects\chao_companion_ai\.venv`, touches neither global PATH
+nor scoop's shared uv-managed Python installs, and `git status` after the
+reinstall showed zero tracked-file changes (only `data/voices/`
+untracked, as always) — nothing here can reach the Piper training
+environment, which lives in a separate directory entirely.
+
+**Verified fixed:** `uv run pytest -q` → 203 passed; `uv run ruff check` →
+all checks passed; `uv run ruff format --check src tests` → all formatted.
+Matches exactly what the `.venv\Scripts\python.exe -m` workaround had been
+reporting all session, confirming the workaround was never masking a real
+code problem — it was purely the trampolines.
+
+**Also investigated, no action needed:** the user separately asked whether
+moving a Piper-training environment down to Python 3.10 was a global PATH
+change. Found two Python 3.10 installs on PATH — a Microsoft Store 3.10.11
+via an App Execution Alias (very early in PATH) and a standalone
+python.org 3.10.2 install (much later in PATH, plausibly the one set up
+for Piper training). The Store alias was already winning bare `python`
+resolution before either install mattered, and the standalone 3.10 entry
+never actually takes priority for that command. **No PATH change was made
+or needed** — this project never relies on bare `python` on PATH, only
+`uv run` / `.venv\Scripts\python.exe`, both of which correctly resolve to
+this project's own 3.14.7 interpreter regardless of what `python` alone
+points to system-wide.
+
+### Session 10, part 7: head/body dual-output parameter expansion
+
+User's own direction, not a code task: "finish adding the manual
+parameters" — `ChaoHeadBob`/`ParamAngleY` (item 4) was the only bound
+axis; face left/right and tilt were still unbound, and the body-angle
+question from item 4 ("no separate body-only channel needed") hadn't
+accounted for the rigger's actual original design.
+
+**User's own finding, from VTS's tracking-parameter mapping, reframed the
+plan mid-stream:** the rigger's design has each `FaceAngle*` tracking
+input fan out to *two* simultaneous outputs at once (e.g. `FaceAngleX` →
+both `ParamAngleX` and `ParamBodyAngleX`, same input driving both). First
+pass (mine, before this was raised) created 5 separate parameters — one
+per head axis, one per body axis — assuming code would need to inject
+matching values into two params per axis. User's clarifying question
+established VTS actually lets *one* plugin-created custom parameter bind
+to two output curves at once, same as a native tracking input can —
+collapsing the design to 3 parameters, each with two outputs, correctly
+matching the rigger's fan-out instead of approximating it in code. The 3
+now-redundant body-only parameters (`ChaoBodyBob`/`ChaoBodyTurn`/
+`ChaoBodyTilt`) were deleted before anything got bound to them.
+
+**Final state, all live-verified:**
+
+| Custom parameter | Output 1 | Output 2 |
+|---|---|---|
+| `ChaoHeadBob` (existing from part 4, second output added) | `ParamAngleY` | `ParamBodyAngleY` |
+| `ChaoHeadTurn` (new) | `ParamAngleX` | `ParamBodyAngleX` |
+| `ChaoHeadTilt` (new) | `ParamAngleZ` | `ParamBodyAngleZ` |
+
+Verified via a scratch hold-test script (same resend-every-0.3s pattern
+as `vts_probe.py`'s `hold_parameter`, since VTS drops an injected
+parameter if it isn't resent within ~1s): all three parameters injected
+at both +25 and -25 of their ±30 range, six holds total. User confirmed
+all six — "resounding success." Full writeup, including the superseded
+reasoning from item 4, in `docs/rigging_check_list.md` item 5.
+
+**Not built this pass, deliberately:** nothing drives `ChaoHeadTurn` or
+`ChaoHeadTilt` yet — this was VTS-side setup only, same "left bound,
+ready to use" treatment `ChaoHeadBob` got in part 4 before §8.1's code
+existed. `ChaoHeadBob`'s existing driver (`VTSMotionPlayer`) needed no
+code change: it already injects one named parameter, and picks up the
+new second output for free. The natural first consumer for the two new
+axes is the idle-drift work flagged as the likely next step before this
+detour (design doc §10.1/§10.2) — previously blocked on exactly this,
+now unblocked.
+
+*(§8.1's implementation details — `director/motion.py`, `VTSMotionPlayer`,
+`Speaker`'s concurrent-motion path — are fully described in the "session
+10 part 5" stopping point above, which supersedes an earlier, more
+tentative draft of this same writeup that used to live here. That draft
+predated this session's testing/advisor pass/live-verification/tuning and
+is removed rather than kept as stale duplicate detail.)*
 
 Picked up with a custom Piper voice (`.onnx`, user-trained) ready for
 testing, plus a review of the not-yet-implemented
