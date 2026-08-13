@@ -109,9 +109,25 @@ unprompted:** imported the real wiring path end-to-end against the actual
 `config/chao.yaml` and the existing `en_US-amy-medium.onnx` — `_build_speaker`
 constructs a real `Speaker` successfully; confirmed graceful `None` +
 warning for both an unset `voice_path` and a `voice_path` pointing at a
-nonexistent file. Not yet confirmed with actual sound coming out of the
-virtual cable — that's the natural next live check, ideally with the
-user's custom voice once it's dropped into `data/voices/`.
+nonexistent file.
+
+**Live-verified with real audio, user-confirmed, after the two fixes
+below:** `config/chao.yaml`'s `voice_path` swapped to the user's own
+trained voice (`data/voices/chao_voice.onnx`, gitignored same as
+amy-medium). Ran a scratch script exercising `Speaker.speak()` directly —
+normal playback plus a cancel-mid-sentence case — three times total as the
+user iterated on the voice model itself (first pass used voice checkpoint
+v2, final pass v4; the `.onnx.json` config wasn't reissued between
+checkpoints, which worked fine — that pairing is normally stable across
+weight-only retraining). All three runs: `output.speech_start` →
+`output.speech_end` with matching `duration_ms` on the completed sentence,
+and **no** `speech_end` published for the sentence cancelled mid-playback
+(confirming `Speaker.speak`'s completed-vs-cut-short distinction holds for
+real, not just in the fake-sink tests). User confirmed by ear on the final
+run: correct custom voice, "chao" and "chao's" both pronounced correctly
+("chow"/"chow's"), and the long sentence audibly cut off partway rather
+than playing to completion. **User signed off — TTS pipeline wiring is
+fully live-verified, not just unit-tested.**
 
 **Second advisor pass, after the design above landed, caught two real gaps
 and one worth a comment:**

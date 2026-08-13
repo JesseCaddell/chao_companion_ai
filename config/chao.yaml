@@ -4,11 +4,11 @@
 tts:
   # Path to the Piper .onnx model; a same-named .onnx.json config must sit
   # next to it (Piper's own convention -- both files are gitignored under
-  # data/voices/, same treatment as chao.db/vts_token.txt). Session 8's
-  # placeholder pick, verified working end-to-end in session 9. Swapping in
-  # the custom voice being trained separately is just changing this path --
-  # no code change (see SESSION_STATE.md, session 8).
-  voice_path: data/voices/en_US-amy-medium.onnx
+  # data/voices/, same treatment as chao.db/vts_token.txt). Session 10:
+  # swapped from the en_US-amy-medium placeholder to the user's own trained
+  # voice, exactly the config-only swap session 8 planned for -- no code
+  # change. Placeholder amy-medium is still on disk if this needs reverting.
+  voice_path: data/voices/chao_voice.onnx
 
   # Case-insensitive substring match against sounddevice's output device
   # list -- "CABLE Input" for VB-Audio Virtual Cable (design doc §18's audio
