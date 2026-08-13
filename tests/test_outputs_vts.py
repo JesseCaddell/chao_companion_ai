@@ -1,9 +1,11 @@
 import asyncio
 
+import pytest
+
 from chao.director.aliveness import FlyConfig
 from chao.director.director import EmoteConfig, EmotePool
 from chao.events import Event, Kind
-from chao.outputs.vts import VTSEmoteSubscriber, VTSFlySubscriber
+from chao.outputs.vts import VTSEmoteSubscriber, VTSFlySubscriber, VTSMotionPlayer
 
 
 class FakeVTSClient:
@@ -34,6 +36,56 @@ class RecordingSleep:
 
     async def __call__(self, duration: float) -> None:
         self.durations.append(duration)
+
+
+class FakeClock:
+    """Same shape as director/mood.py's and director/aliveness.py's test
+    fakes -- a manually-advanced clock so timing assertions are exact
+    instead of racing real wall-clock jitter.
+    """
+
+    def __init__(self, start: float = 0.0):
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class ClockAdvancingSleep:
+    """A sleep fake that actually advances the shared FakeClock by the
+    slept duration, so a test can assert on both "how long did each sleep
+    ask for" and "what did the clock read afterwards" without any real
+    delay.
+    """
+
+    def __init__(self, clock: FakeClock):
+        self.clock = clock
+        self.durations: list[float] = []
+
+    async def __call__(self, duration: float) -> None:
+        self.durations.append(duration)
+        self.clock.advance(duration)
+
+
+class InjectionCostVTSClient(FakeVTSClient):
+    """Simulates a real VTS round trip costing real time -- session 10
+    measured ~17ms/InjectParameterDataRequest against the live API. Used to
+    prove VTSMotionPlayer.play paces to a deadline rather than sleeping a
+    full frame period on top of that cost.
+    """
+
+    def __init__(self, clock: FakeClock, cost: float, **kwargs):
+        super().__init__(**kwargs)
+        self._clock = clock
+        self._cost = cost
+
+    async def request(self, message_type, data=None):
+        result = await super().request(message_type, data)
+        self._clock.advance(self._cost)
+        return result
 
 
 class GatedSleep:
@@ -292,3 +344,131 @@ async def test_fly_baseline_lookup_failure_publishes_error_and_skips_move():
     assert not any(c[0] == "MoveModelRequest" for c in client.calls)
     error = next(e for e in events if e.kind == Kind.ERROR)
     assert error.payload["component"] == "vts"
+
+
+def inject_calls(client: FakeVTSClient) -> list[dict]:
+    return [data for (mtype, data) in client.calls if mtype == "InjectParameterDataRequest"]
+
+
+async def test_motion_player_empty_envelope_is_a_noop():
+    client = FakeVTSClient()
+    player = VTSMotionPlayer(client=client, parameter_name="ChaoHeadBob", sleep=RecordingSleep())
+
+    await player.play([], fps=30.0, cancel=asyncio.Event())
+
+    assert client.calls == []
+
+
+async def test_motion_player_noop_when_already_cancelled():
+    client = FakeVTSClient()
+    player = VTSMotionPlayer(client=client, parameter_name="ChaoHeadBob", sleep=RecordingSleep())
+    cancel = asyncio.Event()
+    cancel.set()
+
+    await player.play([1.0, 2.0], fps=30.0, cancel=cancel)
+
+    assert client.calls == []
+
+
+async def test_motion_player_injects_each_frame_then_ramps_to_zero():
+    client = FakeVTSClient()
+    clock = FakeClock()
+    sleep = ClockAdvancingSleep(clock)  # zero-cost injections -> exact frame_dt spacing
+    player = VTSMotionPlayer(client=client, parameter_name="ChaoHeadBob", sleep=sleep, clock=clock)
+
+    await player.play([5.0, 10.0], fps=30.0, cancel=asyncio.Event())
+
+    values = [c["parameterValues"][0]["value"] for c in inject_calls(client)]
+    assert values == [5.0, 10.0, 0.0]  # two frames, then the explicit ramp-to-rest
+    assert inject_calls(client)[0] == {
+        "faceFound": True,
+        "mode": "set",
+        "parameterValues": [{"id": "ChaoHeadBob", "value": 5.0, "weight": 1}],
+    }
+    assert sleep.durations == [1.0 / 30.0, 1.0 / 30.0]  # no sleep after the final ramp
+
+
+async def test_motion_player_paces_to_a_deadline_not_a_fixed_period_on_top_of_injection_cost():
+    """The bug this pins: sleeping a full frame_dt *after* each injection
+    call (rather than only the remainder of that frame's deadline) makes a
+    clip run ~1.5x longer than the audio it's supposed to track, once a
+    real ~17ms round trip (session 10's measurement) is added on top of a
+    ~33ms frame period. Caught by advisor review before this ever ran live.
+    """
+    clock = FakeClock()
+    sleep = ClockAdvancingSleep(clock)
+    client = InjectionCostVTSClient(clock, cost=0.017)
+    player = VTSMotionPlayer(client=client, parameter_name="ChaoHeadBob", sleep=sleep, clock=clock)
+    fps = 30.0
+    frame_dt = 1.0 / fps
+    envelope = [1.0, 2.0, 3.0, 4.0]
+
+    await player.play(envelope, fps=fps, cancel=asyncio.Event())
+
+    # Fixed-period-after-injection code always sleeps exactly frame_dt;
+    # deadline-paced code must sleep less to absorb the injection cost.
+    assert all(d < frame_dt for d in sleep.durations)
+    # Final clock reading = the paced loop landing exactly on
+    # len(envelope) * frame_dt, plus the one trailing ramp-to-rest
+    # injection's cost (that call isn't paced -- it's the deliberate,
+    # unconditional "return to neutral" after the clip ends). The old
+    # fixed-sleep-after-injection code would instead land at roughly
+    # len(envelope) * (frame_dt + cost) -- ~1.5x this value at these
+    # numbers.
+    assert clock.now == pytest.approx(len(envelope) * frame_dt + 0.017, abs=1e-6)
+
+
+async def test_motion_player_publishes_sampled_vts_param_events():
+    client = FakeVTSClient()
+    events: list[Event] = []
+    player = VTSMotionPlayer(
+        client=client,
+        parameter_name="ChaoHeadBob",
+        publish=events.append,
+        publish_every_n_frames=6,
+        sleep=RecordingSleep(),
+    )
+    envelope = [float(i) for i in range(7)]  # frames 0..6
+
+    await player.play(envelope, fps=30.0, cancel=asyncio.Event())
+
+    param_events = [e for e in events if e.kind == Kind.VTS_PARAM]
+    assert [e.payload["value"] for e in param_events] == [0.0, 6.0]  # frame 0 and frame 6 only
+
+
+async def test_motion_player_stops_early_when_cancelled_mid_clip():
+    client = FakeVTSClient()
+    cancel = asyncio.Event()
+
+    class CancelAfterFirstSleep:
+        def __init__(self):
+            self.calls = 0
+
+        async def __call__(self, duration: float) -> None:
+            self.calls += 1
+            cancel.set()
+
+    player = VTSMotionPlayer(
+        client=client, parameter_name="ChaoHeadBob", sleep=CancelAfterFirstSleep()
+    )
+
+    await player.play([1.0, 2.0, 3.0], fps=30.0, cancel=cancel)
+
+    values = [c["parameterValues"][0]["value"] for c in inject_calls(client)]
+    assert values == [1.0, 0.0]  # first frame injected, then cancelled before the second
+
+
+async def test_motion_player_injection_failure_stops_clip_and_publishes_error():
+    client = FakeVTSClient(fail_message_types={"InjectParameterDataRequest"})
+    events: list[Event] = []
+    player = VTSMotionPlayer(
+        client=client, parameter_name="ChaoHeadBob", publish=events.append, sleep=RecordingSleep()
+    )
+
+    await player.play([1.0, 2.0, 3.0], fps=30.0, cancel=asyncio.Event())
+
+    # First injection fails -> loop breaks; the trailing ramp-to-zero also fails.
+    assert len(inject_calls(client)) == 2
+    errors = [e for e in events if e.kind == Kind.ERROR]
+    assert len(errors) == 2
+    assert all(e.payload["component"] == "vts" for e in errors)

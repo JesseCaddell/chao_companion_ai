@@ -16,3 +16,34 @@ tts:
   # which is deliberately not an error (see outputs/audio.py's
   # resolve_output_device) -- useful for local testing without OBS running.
   output_device: null
+
+motion:                    # §8.1 envelope-driven motion. See director/motion.py
+                            # and docs/rigging_check_list.md item 4 for how these
+                            # values were chosen -- not arbitrary defaults.
+  parameter_name: ChaoHeadBob  # custom VTS tracking parameter, already created and
+                                # bound to ParamAngleY ("Face up/down rotation") --
+                                # confirmed live to move head+body together, since
+                                # ParamBodyAngleY itself is inert in this rig's art.
+                                # If this name doesn't match what's bound in VTS,
+                                # injection sends real requests into a void: no
+                                # error, no motion, nothing to notice by. Verify the
+                                # binding by name if motion ever silently stops.
+  fps: 30                      # NOT design doc §8.1's nominal 60 -- a live probe
+                                # (session 10) measured ~17ms per InjectParameterData
+                                # Request round trip, leaving zero headroom at 60Hz
+                                # once outputs/vts.py's concurrency lock is in the
+                                # picture. 30Hz leaves ~2x headroom.
+  reference_rms: 0.1           # fixed reference for normalization, not per-sentence
+                                # peak -- a quiet sentence should bob less than a
+                                # loud one. Tuning placeholder, not measured against
+                                # this voice's typical RMS yet.
+  attack_s: 0.03                # fast rise on increasing energy
+  release_s: 0.15               # slower decay, so it doesn't chatter between syllables
+  amplitude: 25                 # peak parameter value at normalized energy 1.0 --
+                                 # ChaoHeadBob's bound range is -30..30. Session 10:
+                                 # live-verified at 15 (synced, smooth, not maxed out)
+                                 # -- user's call afterward was that 15 read as tame
+                                 # and an animated character should lean exaggerated,
+                                 # not conservative. Bumped to 25, leaving a little
+                                 # headroom under the ±30 hard limit rather than
+                                 # pinning it exactly there.

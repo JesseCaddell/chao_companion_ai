@@ -4,7 +4,231 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
-## Stopping point (session 10, 2026-08-13, in progress)
+## Stopping point (session 10 part 5, 2026-08-13, live-verified)
+
+§8.1 envelope-driven motion, picked back up after the previous session was
+cut short mid-task by context budget. Followed that session's own
+next-steps list in order: re-ran the suite and ruff cold before touching
+anything (both clean — 181 passed, confirming the unfinished code didn't
+break anything, just wasn't covered yet); wrote the missing tests; called
+`advisor` before going live, which caught a real bug the tests as first
+written couldn't see; fixed it; live-verified twice against real VTS and
+the real trained voice; tuned by ear per user feedback. Now committed-ready
+(see below for what's still open).
+
+**Real bug caught by `advisor` before any live run, not found live:**
+`VTSMotionPlayer.play` was sleeping a full `frame_dt` *after* each
+injection call instead of only the remainder of that frame's deadline. A
+real `InjectParameterDataRequest` costs ~17ms against a ~33ms budget at
+30fps, so the clip would have run ~1.5x longer than the audio it's
+supposed to track, drifting further out of sync as a sentence goes on —
+and since `Speaker._play_with_motion` gathers both tasks,
+`output.speech_end` (and therefore the next queued sentence, via
+`_drain_speech`) would have waited on the overrun too. **Fixed:** paced to
+a fixed deadline schedule (`start + (i+1)*frame_dt`, `remaining = deadline
+- clock()`, sleep only if positive) instead of a per-frame fixed sleep.
+`clock` is now an injectable field on `VTSMotionPlayer` (defaults to
+`time.monotonic`, same as `sleep`'s existing shape) so tests can pace
+deterministically. Confirmed the fix matters, not just theoretically: ran
+the old logic standalone against the same inputs used in the new
+discriminating test — it overran to 0.218s where the paced version lands
+on 0.150s, for a 4-frame/17ms-cost clip. The test that would have caught
+the original bug and didn't (`sleep.durations == [1/30, 1/30]`, satisfied
+by exactly the code that overruns live) was replaced with one that pins
+the deadline behavior using a `FakeClock`/`ClockAdvancingSleep` pair, the
+same fake-clock shape already established in `mood.py`'s and
+`aliveness.py`'s tests.
+
+**Second, smaller fix from the same advisor pass:** `__main__.py`'s
+`_attach_motion` had `except VTSAPIError: pass`, meant to treat "parameter
+already exists" as expected — but a bare `except` there swallows *any*
+`VTSAPIError`, including a genuine failure that would leave the code
+injecting into a parameter nothing is bound to (the exact silent-failure
+mode the function's own docstring already warned about, just not yet
+guarded against). Now prints `error_id`/`message` instead of discarding
+them; not narrowed to the specific duplicate-name error ID yet since that
+number hadn't actually been observed until this session's live run gave
+it.
+
+**21 new tests** (11 `tests/test_director_motion.py`, 6 added to
+`tests/test_outputs_vts.py` for `VTSMotionPlayer`, 4 added to
+`tests/test_outputs_speech.py` for `Speaker`'s concurrent-motion path),
+**203 total passing**, ruff clean, `ruff format` clean.
+
+**Also found and fixed, unrelated to the motion code itself:** the
+user's trained voice's config file was on disk as `chao_voice.json`, but
+Piper's own loader (`PiperVoice.load`) hard-requires
+`<model_stem>.onnx.json` next to the `.onnx` weights — confirmed by a
+direct load attempt raising `FileNotFoundError` for
+`chao_voice.onnx.json` specifically. Not a code bug; the training
+pipeline (a separate, python-3.10 environment per the user, mentioned
+in-conversation — see the environment note below) just doesn't name its
+output the way Piper's runtime expects. Fixed by copying (not moving)
+`chao_voice.json` → `chao_voice.onnx.json` in `data/voices/`, so the
+original stays in place in case the training tooling itself expects that
+name. Both files are gitignored, same as every other `data/voices/*`
+asset — nothing to commit for this.
+
+**Live-verified twice against real VTS and the real `chao_voice.onnx`
+voice**, via a scratch script (not committed, same throwaway spirit as
+prior sessions' probes) that imports and calls the actual production
+functions (`chao.__main__._build_speaker`, `_attach_motion`, the real
+`Speaker`/`PiperBackend`/`VTSClient`) rather than reimplementing the
+wiring:
+
+- **First run** (`amplitude: 15`, the untested placeholder inherited from
+  the original design): user confirmed **synced well, smooth** (not the
+  "very jerky" raw two-point snap from session 10 part 4's test), but
+  **not maxed out the whole time** yet also read as visually tame overall.
+- **User's call: amplitude should be exaggerated, not conservative** —
+  "for an animated character, exaggerated motion is a plus, not a
+  negative." Bumped `motion.amplitude` **15 → 25** (of the parameter's
+  bound ±30 range) in both `config/chao.yaml` and `MotionConfig`'s
+  dataclass default, with the reasoning recorded inline in both places so
+  a future reader doesn't have to rediscover why 25 and not, say, the full
+  30 (left a little headroom under the hard limit rather than pinning
+  exactly at it).
+- **Second run at amplitude 25:** user confirmed **much better** — bigger,
+  more expressive range (values now spanning roughly single digits up to
+  ~25 on emphasized syllables, vs. mostly pinned near 14-15/15 before) —
+  **with one real, not-yet-chased finding: some small jerks mid-sentence.**
+  Not investigated further this session (same "record it, don't chase
+  every finding immediately" discipline as session 10 part 4's own jerky-
+  snap note) — candidate causes for whoever picks this up: per-frame RMS
+  quantization becoming more visible at higher amplitude, occasional real
+  injection round trips running long enough to compress a frame's
+  `remaining` sleep to ~0, or something else entirely. Not reproduced
+  against a controlled signal, so no root cause claimed yet.
+- **Real tuning data point, not a guess:** actual synthesized-clip RMS
+  measured at ~0.10-0.14 across the two runs (the exact sentence, real
+  voice) — close to the `reference_rms: 0.1` placeholder, so that value
+  wasn't far off blind. Left unchanged this session; flagged as the next
+  knob to consider if the mid-sentence jerks turn out to be a
+  clamping/saturation artifact rather than a timing one (peak hit 1.0 on
+  both runs, meaning louder syllables are already saturating the
+  normalization).
+- **User asked for a note, not a build:** a live/dashboard control for
+  `motion.amplitude` (and likely other `motion:` tuning fields) so this
+  doesn't require an edit-yaml-and-rerun-a-script loop every time it needs
+  adjusting by ear — exactly the "changed by feel, at runtime, often" case
+  CLAUDE.md's config conventions name explicitly, but with no runtime path
+  today. Added to design doc §11.2 as a session-10 note against the
+  existing override-panel item (item 8), not built — the dashboard has
+  only the event-feed panel so far (§11.2 item 3), and this needs that
+  override panel to exist first.
+
+**Environment note, raised by the user, not yet acted on:** `uv run` is
+broken machine-wide (`uv trampoline failed to canonicalize script path`);
+worked around all session by calling `.venv\Scripts\python.exe -m pytest`
+/ `-m ruff` directly, which works fine (`.venv`'s own interpreter is
+Python 3.14.7, matching `pyproject.toml`'s `requires-python = ">=3.11"`).
+Separately, plain `python`/`python --version` on this machine's PATH
+resolves to a **Python 3.10.11** Windows Store alias, not the project's
+`.venv` — the user mentioned they moved a *separate* environment (used for
+Piper voice training, referenced a `shift_voice.py` tool in earlier
+sessions, outside this repo) down to Python 3.10, and is unsure whether
+that was a global change or scoped to that other environment. **Not
+investigated yet** — the user asked to address and tidy up the
+environment after this session's live check, which is now done. Next
+session (or later this one, if there's time): check whether the 3.10
+PATH entry is new/related to the Piper-training move, and whether it
+explains the `uv run` trampoline breakage, before deciding whether
+`uv sync` or a PATH fix is the right remedy.
+
+**Not yet committed.** `git status` shows `director/motion.py` (new),
+modified `outputs/vts.py`/`outputs/speech.py`/`__main__.py`/
+`config/chao.yaml`, the design doc's new session-10 note, this writeup,
+and the three new/modified test files. Per this project's established
+per-part-commit discipline (visible in recent git log — `71d5854`,
+`30df346`, `d6be08c` are each one part of this same session), this is
+ready to land as its own commit once the user confirms.
+
+**Built, not yet tested or committed:**
+- `director/motion.py` (new) — `MotionConfig`/`load_motion_config` +
+  `extract_envelope(samples, sample_rate, config)`: pure function, RMS per
+  `1/fps`-sized block, normalized against a **fixed** `reference_rms`
+  (not per-sentence peak — a quiet sentence should bob less than a loud
+  one), clamped [0,1], one-pole attack/release smoothing (short attack,
+  longer release per §8.1), scaled by `amplitude`. No I/O in the core
+  function; `load_motion_config` reads `config/chao.yaml`'s new `motion:`
+  block, same split as `mood.py`.
+  - **Real finding baked into the default config, not guessed:** a live
+    round-trip measurement of `InjectParameterDataRequest` averaged
+    ~17ms/call (100 sequential calls, real VTS) — right at 60Hz's 16.7ms
+    budget with zero headroom. Default `fps` is **30**, not §8.1's nominal
+    60, documented inline with the measurement.
+  - One motion channel, not two — `docs/rigging_check_list.md` item 4
+    established body bob and head nod collapse to one signal on this rig.
+- `outputs/vts.py` — **`VTSClient.request()` now holds an `asyncio.Lock`
+  around send/recv.** This was `advisor`'s flagged blocker: send-then-recv
+  has no `requestID` correlation, and was only safe before because
+  `_run_vts_subscriber` drove everything sequentially in one loop. A 60Hz-
+  ish motion loop running concurrently with emote/fly handling on the same
+  connection would interleave responses without this. **Also added:**
+  `VTSMotionPlayer` — plays an envelope into VTS at a fixed rate,
+  cancellable per-frame (checks `cancel` between injections, not a bulk
+  sleep), ramps explicitly to 0.0 on every exit path (finished, cancelled,
+  or mid-clip failure) rather than relying on VTS's own ~1s undefined-decay
+  auto-drop, reports failures via `Kind.ERROR` and stops that clip's motion
+  without raising, publishes `Kind.VTS_PARAM` sampled every 6th frame (not
+  every frame — design doc §13 says "sampled, not every frame"). `sleep` is
+  an injectable field (matches `VTSEmoteSubscriber`'s existing pattern) so
+  tests won't need to wait in real time — **but no tests were written yet.**
+- `outputs/speech.py` — `Speaker` gained `motion: VTSMotionPlayer | None`
+  (mutable, set post-construction — same reason `orchestrator.speaker` is:
+  a real `VTSMotionPlayer` needs a connected `VTSClient`, which doesn't
+  exist yet when `_build_speaker` runs synchronously in `main()`) and
+  `motion_config`. `speak()` now runs audio playback and motion injection
+  **concurrently** via `asyncio.gather(..., return_exceptions=True)`,
+  re-raising only the audio task's exception — a motion/VTS failure must
+  never kill audio (mirrors `_drain_speech`'s "a speech failure doesn't
+  crash an otherwise-fine turn" lesson from earlier this session).
+  `completed`/`speech_end` still driven by audio alone.
+- `config/chao.yaml` — new `motion:` block: `parameter_name: ChaoHeadBob`,
+  `fps: 30`, `reference_rms: 0.1` (untuned placeholder), `attack_s: 0.03`,
+  `release_s: 0.15`, `amplitude: 15` (half of `ChaoHeadBob`'s bound ±30
+  range — conservative, untested starting point), `param_min`/`param_max:
+  -30/30` (must match the VTS-side bind, used only when recreating the
+  parameter).
+- `__main__.py` — `_attach_motion(client, speaker, motion_config, publish)`
+  (new): re-issues `ParameterCreationRequest` for `ChaoHeadBob` on every
+  startup (tolerates "already exists" via `VTSAPIError`) since the
+  *parameter* is plugin-created and may not survive a VTS restart even
+  though the *binding* (done once, by hand, in the VTS UI) does. Called
+  from `_run_vts_subscriber` right after connect succeeds, only if a
+  `Speaker` exists. **Documented, unverified risk:** if
+  `motion_config.parameter_name` doesn't match what's actually bound in
+  VTS, injection sends real successful requests into nothing — no error,
+  no motion, no signal anywhere that it's wrong.
+
+**Explicitly not done yet:**
+- No tests for `director/motion.py`, the `VTSMotionPlayer` additions to
+  `outputs/vts.py`, or `Speaker`'s concurrent-motion path in
+  `outputs/speech.py`.
+- Full suite was **not re-run** after the last edit (two `ruff` B008 fixes
+  — mutable-default-arg lint errors on `MotionConfig()` defaults in
+  `motion.py` and `speech.py`, fixed by switching to `config: MotionConfig
+  | None = None` + `config = config or MotionConfig()`). Last confirmed
+  green run was 181 passed, *before* those two fixes and before this
+  feature's code existed at all — treat current code as unverified.
+- No live check against real VTS (the smoothed-envelope version should
+  finally resolve `rigging_check_list.md` item 4's "very jerky" caveat
+  from the raw two-point snap test, but that's unconfirmed).
+- `advisor`'s other two flags (`ChaoHeadBob` recreate-on-startup,
+  fixed-vs-peak normalization) were addressed in code but **not verified
+  live** — only reasoned through.
+- §8.3 arousal-scaled amplitude deliberately deferred, per `advisor`:
+  `Speaker` has no mood access; fixed amplitude first, confirm it reads
+  right on screen, modulate later.
+- Nothing in this part is committed. `git status` will show
+  `director/motion.py` (new), plus modified `outputs/vts.py`,
+  `outputs/speech.py`, `__main__.py`, `config/chao.yaml`.
+
+**Next session, in order:** re-run `uv run pytest` and `ruff check` cold
+before touching anything else (don't trust this writeup's code
+descriptions until the suite actually confirms them); write the missing
+tests; only then attempt a live check; commit once live-verified, same
+discipline as every other feature this session.
 
 Picked up with a custom Piper voice (`.onnx`, user-trained) ready for
 testing, plus a review of the not-yet-implemented

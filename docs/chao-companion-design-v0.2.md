@@ -536,6 +536,15 @@ full panel of its own. Flagged here so it doesn't get lost before the
 event-feed-only skeleton (§11.2 item 3, the only panel built so far)
 grows.
 
+**Note (session 10, part 5):** tuning §8.1's envelope-driven motion live
+(`motion.amplitude`, and likely `reference_rms` next) meant editing
+`config/chao.yaml` and re-running a scratch script for every single
+adjustment — exactly the "changed by feel, at runtime, often" case
+CLAUDE.md's config conventions call out, but with no runtime path to do
+it. Belongs on the override panel (item 8) once it exists: live sliders
+for `motion.*`'s tuning fields, not just the mood/emote overrides already
+scoped there.
+
 ### 11.3 Two features worth the extra effort
 
 **Session replay.** Every event to JSONL; the dashboard can scrub a past session. You will constantly need to know what happened in the ten seconds *before* something strange, and you cannot investigate that live while streaming.

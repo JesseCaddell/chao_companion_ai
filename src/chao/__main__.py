@@ -33,11 +33,18 @@ from chao.dashboard.server import DASHBOARD_HOST, DASHBOARD_PORT, create_app
 from chao.director.aliveness import Aliveness, Fly, FlyConfig, load_fly_config
 from chao.director.director import Director, EmoteConfig, load_emote_config
 from chao.director.mood import Mood, MoodConfig, load_mood_config
+from chao.director.motion import MotionConfig, load_motion_config
 from chao.events import Event, Kind
 from chao.outputs.audio import AudioPlayer, resolve_output_device
 from chao.outputs.speech import Speaker, TTSConfig, load_tts_config
 from chao.outputs.tts import PiperBackend
-from chao.outputs.vts import VTSClient, VTSEmoteSubscriber, VTSFlySubscriber
+from chao.outputs.vts import (
+    VTSAPIError,
+    VTSClient,
+    VTSEmoteSubscriber,
+    VTSFlySubscriber,
+    VTSMotionPlayer,
+)
 
 CONFIG_DIR = Path("config")
 IDENTITY_PATH = CONFIG_DIR / "identity.md"
@@ -68,10 +75,14 @@ def build_pipeline(
     return bus, orchestrator
 
 
-def _build_speaker(tts_config: TTSConfig, publish: Callable[[Event], None]) -> Speaker | None:
+def _build_speaker(
+    tts_config: TTSConfig, motion_config: MotionConfig, publish: Callable[[Event], None]
+) -> Speaker | None:
     """Degrades gracefully, same shape as `_run_vts_subscriber`'s "VTS
     unavailable" handling: a missing/unset voice file shouldn't crash the
-    app, just leave the chao silent.
+    app, just leave the chao silent. `speaker.motion` starts unset --
+    `_run_vts_subscriber` attaches a real `VTSMotionPlayer` once (if) VTS
+    actually connects, since that's the earliest a `VTSClient` exists.
     """
     if not tts_config.voice_path:
         print("  (no tts.voice_path configured in config/chao.yaml, chao won't speak)")
@@ -83,7 +94,7 @@ def _build_speaker(tts_config: TTSConfig, publish: Callable[[Event], None]) -> S
     backend = PiperBackend(voice_path)
     device = resolve_output_device(tts_config.output_device)
     player = AudioPlayer(device=device)
-    return Speaker(backend=backend, player=player, publish=publish)
+    return Speaker(backend=backend, player=player, publish=publish, motion_config=motion_config)
 
 
 async def _print_errors(sub: asyncio.Queue[Event]) -> None:
@@ -112,7 +123,13 @@ async def _run_dashboard_server(bus: Bus) -> None:
     await server.serve()
 
 
-async def _run_vts_subscriber(bus: Bus, emote_config: EmoteConfig, fly_config: FlyConfig) -> None:
+async def _run_vts_subscriber(
+    bus: Bus,
+    emote_config: EmoteConfig,
+    fly_config: FlyConfig,
+    speaker: Speaker | None,
+    motion_config: MotionConfig,
+) -> None:
     """Connects to VTS and turns `director.emote`/`state.fly` events into
     real VTS API calls, over the one shared connection (both subscribers
     dispatch off the same event stream and no-op on kinds they don't own).
@@ -141,6 +158,9 @@ async def _run_vts_subscriber(bus: Bus, emote_config: EmoteConfig, fly_config: F
         print(f"  (VTS unavailable, emotes won't display: {e})")
         return
 
+    if speaker is not None:
+        await _attach_motion(client, speaker, motion_config, bus.publish)
+
     emote_subscriber = VTSEmoteSubscriber(
         client=client, emote_config=emote_config, publish=bus.publish
     )
@@ -152,6 +172,54 @@ async def _run_vts_subscriber(bus: Bus, emote_config: EmoteConfig, fly_config: F
             await fly_subscriber.handle(event)
     finally:
         await client.close()
+
+
+async def _attach_motion(
+    client: VTSClient,
+    speaker: Speaker,
+    motion_config: MotionConfig,
+    publish: Callable[[Event], None],
+) -> None:
+    """§8.1's envelope-driven motion needs a custom VTS tracking parameter
+    to inject into. The *binding* (parameter -> ParamAngleY) is a one-time
+    manual step done in the VTS UI (docs/rigging_check_list.md item 4) and
+    survives model saves, but the *parameter itself* is created via a
+    plugin API call, so it's created fresh (idempotently -- VTS rejects a
+    duplicate name, which is treated as "already exists, fine") on every
+    startup rather than assumed to persist across a VTS restart.
+
+    If `motion_config.parameter_name` doesn't match whatever's actually
+    bound in the VTS UI, injection will send real, successful requests
+    into a parameter nothing is listening to -- no error, no motion,
+    nothing to notice by. That's a VTS-side setup mismatch, not something
+    this function can detect from here.
+    """
+    try:
+        await client.request(
+            "ParameterCreationRequest",
+            {
+                "parameterName": motion_config.parameter_name,
+                "explanation": "chao §8.1 envelope-driven motion",
+                "min": motion_config.param_min,
+                "max": motion_config.param_max,
+                "defaultValue": 0,
+            },
+        )
+    except VTSAPIError as e:
+        # Expected steady-state case is "already exists" from a previous
+        # run, but a bare `except: pass` here would also swallow a genuine
+        # API failure -- exactly the silent-injects-into-nothing failure
+        # mode this function's own docstring warns about. Print the real
+        # error_id/message so a first live run can tell the two apart; VTS
+        # hasn't handed us the duplicate-name error's specific ID yet to
+        # narrow this catch further.
+        print(f"  (ParameterCreationRequest for {motion_config.parameter_name}: {e})")
+    except (OSError, RuntimeError) as e:
+        print(f"  (couldn't set up motion parameter, chao won't move to speech: {e})")
+        return
+    speaker.motion = VTSMotionPlayer(
+        client=client, parameter_name=motion_config.parameter_name, publish=publish
+    )
 
 
 async def _run_aliveness(bus: Bus, emote_config: EmoteConfig) -> None:
@@ -226,6 +294,7 @@ async def main() -> None:
     mood_config = load_mood_config(EMOTES_PATH)
     fly_config = load_fly_config(EMOTES_PATH)
     tts_config = load_tts_config(CHAO_CONFIG_PATH)
+    motion_config = load_motion_config(CHAO_CONFIG_PATH)
 
     cloud = AnthropicBackend()  # reads ANTHROPIC_API_KEY from the environment
     local = OllamaBackend(os.environ.get("CHAO_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL))
@@ -234,11 +303,14 @@ async def main() -> None:
     bus, orchestrator = build_pipeline(
         identity=identity, emote_config=emote_config, backend=backend
     )
-    orchestrator.speaker = _build_speaker(tts_config, bus.publish)
+    speaker = _build_speaker(tts_config, motion_config, bus.publish)
+    orchestrator.speaker = speaker
 
     error_task = asyncio.create_task(_print_errors(bus.subscribe()))
     dashboard_task = asyncio.create_task(_run_dashboard_server(bus))
-    vts_task = asyncio.create_task(_run_vts_subscriber(bus, emote_config, fly_config))
+    vts_task = asyncio.create_task(
+        _run_vts_subscriber(bus, emote_config, fly_config, speaker, motion_config)
+    )
     aliveness_task = asyncio.create_task(_run_aliveness(bus, emote_config))
     mood_task = asyncio.create_task(_run_mood(bus, mood_config))
     fly_task = asyncio.create_task(_run_fly(bus, fly_config))

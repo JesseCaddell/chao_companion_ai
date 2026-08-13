@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +44,16 @@ class VTSClient:
         self.url = url
         self._ws: websockets.ClientConnection | None = None
         self._req_id = 0
+        # Send-then-recv with no requestID correlation is only safe with
+        # exactly one request in flight at a time. Every caller used to get
+        # that for free because _run_vts_subscriber drove emote/fly
+        # handling sequentially in one loop -- session 10's motion player
+        # breaks that assumption (injection runs concurrently with speech,
+        # and emotes can fire mid-sentence by design), so this lock is load
+        # -bearing, not defensive. A ~30Hz injection loop measured against
+        # the real API (SESSION_STATE.md session 10) has enough headroom
+        # to absorb occasional contention from a concurrent emote/fly call.
+        self._lock = asyncio.Lock()
 
     async def connect(self) -> None:
         self._ws = await websockets.connect(self.url)
@@ -52,16 +63,17 @@ class VTSClient:
             await self._ws.close()
 
     async def request(self, message_type: str, data: dict | None = None) -> dict:
-        self._req_id += 1
-        payload = {
-            "apiName": API_NAME,
-            "apiVersion": API_VERSION,
-            "requestID": f"chao-{self._req_id}",
-            "messageType": message_type,
-            "data": data or {},
-        }
-        await self._ws.send(json.dumps(payload))
-        response = json.loads(await self._ws.recv())
+        async with self._lock:
+            self._req_id += 1
+            payload = {
+                "apiName": API_NAME,
+                "apiVersion": API_VERSION,
+                "requestID": f"chao-{self._req_id}",
+                "messageType": message_type,
+                "data": data or {},
+            }
+            await self._ws.send(json.dumps(payload))
+            response = json.loads(await self._ws.recv())
         if response.get("messageType") == "APIError":
             err = response["data"]
             raise VTSAPIError(err["errorID"], err["message"])
@@ -295,3 +307,96 @@ class VTSFlySubscriber:
                     payload={"component": "vts", "message": "fly expression toggle failed"},
                 )
             )
+
+
+@dataclass
+class VTSMotionPlayer:
+    """Plays a precomputed envelope (`director/motion.py`'s
+    `extract_envelope` output) into VTS at a fixed frame rate, concurrently
+    with audio playback -- see `outputs/speech.py`'s `Speaker` for how the
+    two are started together against the same cancel token (design doc
+    §8.1's "replay against the audio clock").
+
+    Cancellable the same way `AudioPlayer` is: checks `cancel` between
+    frames rather than sleeping through the whole clip uninterruptibly
+    (CLAUDE.md invariant 5). A per-call failure (VTS unavailable, request
+    error) is reported and stops this clip's motion -- it must never
+    propagate and kill the sibling audio task; `Speaker` relies on that.
+    """
+
+    client: VTSTransport
+    parameter_name: str
+    publish: Callable[[Event], None] = _default_publish
+    # Published to the dashboard at a fraction of the injection rate --
+    # design doc §13 explicitly specs vts.param as "sampled, not every
+    # frame." Every frame at 30Hz would be pure bus noise nothing consumes
+    # yet (no sparkline panel exists), same reasoning session 9 used to
+    # gate Mood.tick()'s publish rate.
+    publish_every_n_frames: int = 6
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    # time.monotonic per CLAUDE.md ("all timing uses time.monotonic()").
+    # Injectable so tests can pace deterministically without real delays --
+    # same shape as `sleep` above.
+    clock: Callable[[], float] = time.monotonic
+
+    async def play(self, envelope: list[float], fps: float, *, cancel: asyncio.Event) -> None:
+        if not envelope or cancel.is_set():
+            return
+        frame_dt = 1.0 / fps if fps > 0 else 0.0
+
+        # Paced to a deadline schedule, not a fixed per-frame sleep -- a
+        # real InjectParameterDataRequest round trip costs ~17ms
+        # (SESSION_STATE.md session 10 measurement) and sleeping a full
+        # frame_dt *after* that call, as an earlier version of this code
+        # did, stretches the clip to well past the audio's real duration
+        # (~50ms/frame at 30fps instead of ~33ms -- a ~1.5x overrun caught
+        # by advisor review before this ever ran live). Sleeping only the
+        # remainder of each frame's deadline keeps the clip's total wall-
+        # clock length matched to `len(envelope) * frame_dt`, which is the
+        # whole point of "replay against the audio clock" (design doc
+        # §8.1).
+        start = self.clock()
+        for i, value in enumerate(envelope):
+            if cancel.is_set():
+                break
+            if not await self._inject(value):
+                break  # failure already reported inside _inject
+            if i % self.publish_every_n_frames == 0:
+                self.publish(
+                    Event(
+                        kind=Kind.VTS_PARAM, payload={"name": self.parameter_name, "value": value}
+                    )
+                )
+            deadline = start + (i + 1) * frame_dt
+            remaining = deadline - self.clock()
+            if remaining > 0:
+                await self.sleep(remaining)
+
+        # Ramp to rest explicitly, on every exit path (finished, cancelled,
+        # or a mid-clip injection failure above) -- VTS drops an un-resent
+        # tracking parameter on its own after ~1s, but with an undefined
+        # decay shape. An explicit 0.0 is a controlled return to neutral,
+        # not a wait-and-see. If the client is genuinely down, this fails
+        # too and reports its own (harmless, redundant) error via _inject.
+        await self._inject(0.0)
+
+    async def _inject(self, value: float) -> bool:
+        try:
+            await self.client.request(
+                "InjectParameterDataRequest",
+                {
+                    "faceFound": True,
+                    "mode": "set",
+                    "parameterValues": [{"id": self.parameter_name, "value": value, "weight": 1}],
+                },
+            )
+        except Exception:
+            logger.exception("VTS motion injection failed (parameter=%s)", self.parameter_name)
+            self.publish(
+                Event(
+                    kind=Kind.ERROR,
+                    payload={"component": "vts", "message": "motion injection failed"},
+                )
+            )
+            return False
+        return True

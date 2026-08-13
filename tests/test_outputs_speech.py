@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 
+from chao.director.motion import MotionConfig
 from chao.events import Event, Kind
 from chao.outputs.audio import AudioPlayer
 from chao.outputs.speech import Speaker, load_tts_config
@@ -149,3 +150,80 @@ def test_load_tts_config_defaults_when_file_missing(tmp_path):
 
     assert config.voice_path == ""
     assert config.output_device is None
+
+
+class FakeMotionPlayer:
+    def __init__(self, raise_error: bool = False) -> None:
+        self.calls: list[tuple[list[float], float]] = []
+        self._raise_error = raise_error
+
+    async def play(self, envelope, fps, *, cancel):
+        self.calls.append((envelope, fps))
+        if self._raise_error:
+            raise RuntimeError("simulated motion failure")
+
+
+class FailingSink(FakeSink):
+    def play(self, samples: np.ndarray, sample_rate: int) -> None:
+        raise RuntimeError("simulated audio failure")
+
+
+async def test_speak_runs_motion_concurrently_when_motion_is_configured():
+    from chao.director.motion import extract_envelope
+
+    events: list[Event] = []
+    speaker, _voice = make_speaker([_chunk(22050)], events)
+    speaker.motion = FakeMotionPlayer()
+    speaker.motion_config = MotionConfig(fps=30.0)
+
+    await speaker.speak("hello", turn_id="t1", cancel=asyncio.Event())
+
+    assert len(speaker.motion.calls) == 1
+    envelope, fps = speaker.motion.calls[0]
+    assert fps == 30.0
+    expected = extract_envelope(np.zeros(22050, dtype=np.float32), 22050, speaker.motion_config)
+    assert envelope == expected
+    kinds = [e.kind for e in events]
+    assert kinds == [Kind.OUTPUT_SPEECH_START, Kind.OUTPUT_SPEECH_END]
+
+
+async def test_speak_does_not_touch_motion_when_none_is_configured():
+    events: list[Event] = []
+    speaker, _voice = make_speaker([_chunk(100)], events)
+    assert speaker.motion is None  # default
+
+    await speaker.speak("hello", turn_id="t1", cancel=asyncio.Event())
+
+    kinds = [e.kind for e in events]
+    assert kinds == [Kind.OUTPUT_SPEECH_START, Kind.OUTPUT_SPEECH_END]
+
+
+async def test_speak_motion_failure_does_not_prevent_speech_end():
+    """A VTS/motion failure must never kill an otherwise-successful turn's
+    audio -- same lesson brain/turn.py's `_drain_speech` already applies to
+    a speech failure not killing an otherwise-fine turn.
+    """
+    events: list[Event] = []
+    speaker, _voice = make_speaker([_chunk(100)], events)
+    speaker.motion = FakeMotionPlayer(raise_error=True)
+
+    await speaker.speak("hello", turn_id="t1", cancel=asyncio.Event())
+
+    kinds = [e.kind for e in events]
+    assert kinds == [Kind.OUTPUT_SPEECH_START, Kind.OUTPUT_SPEECH_END]
+
+
+async def test_speak_audio_failure_propagates_even_with_motion_configured():
+    events: list[Event] = []
+    voice = FakeVoice([_chunk(100)])
+    backend = PiperBackend(Path("unused.onnx"), voice=voice)
+    player = AudioPlayer(sink=FailingSink())
+    speaker = Speaker(backend=backend, player=player, publish=events.append)
+    speaker.motion = FakeMotionPlayer()
+
+    try:
+        await speaker.speak("hello", turn_id="t1", cancel=asyncio.Event())
+        raised = False
+    except RuntimeError:
+        raised = True
+    assert raised
