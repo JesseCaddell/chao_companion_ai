@@ -40,14 +40,13 @@ fly:
   on_above: 0.70
   off_below: 0.40
   min_dwell_s: 5
-  x_range: [-0.4, 0.4]      # MoveModelRequest positionX bounds (§6.4 horizontal
-                             # flying, session 9). -0.4 confirmed reachable live via
-                             # a MoveModelRequest probe -- it genuinely interpolates
-                             # (not a snap), positionX went baseline ~-0.03 -> -0.4
-                             # smoothly over the requested timeInSeconds. Exact
-                             # visible window edges NOT yet confirmed by eye --
-                             # this range is a conservative placeholder pending
-                             # that visual check. Tune once confirmed.
+  x_range: [-0.6, 0.6]      # MoveModelRequest positionX bounds (§6.4 horizontal
+                             # flying). Eyeballed live against the real OBS-capture
+                             # framing (session 10): started at the session-9
+                             # placeholder [-0.4, 0.4] (~2in of margin on each side,
+                             # comfortable), then confirmed [-0.6, 0.6] stays fully
+                             # on screen with a perfect glide both ways -- locked in
+                             # at 0.6, not pushed further since it wasn't tested.
   move_duration_s: 2.0      # timeInSeconds per MoveModelRequest while repositioning
   land_duration_s: 1.5      # shorter glide back to resting X when landing
   min_reposition_s: 8.0     # minimum gap between horizontal repositions while flying

@@ -161,6 +161,56 @@ commit-hygiene note (batch *related* changes, not unrelated ones together).
 `pyproject.toml`/`uv.lock`'s `sounddevice` addition belongs with the wiring
 commit, not the pronunciation one.
 
+### Session 10, part 2: fly `x_range` eyeball check, plus a Y-axis and size scan
+
+Closed out session 9's other flagged loose end: `fly.x_range`'s exact
+bounds hadn't been confirmed by eye against the real OBS-capture framing,
+only proven not to error via a raw API probe. Used scratch scripts (not
+committed — one-off diagnostics in the same spirit as `tools/vts_probe.py`
+but not generalized into a permanent tool) issuing the same
+`MoveModelRequest` shape `VTSFlySubscriber` actually uses, so what got
+eyeballed is exactly what a real flight looks like.
+
+- **`x_range` widened and locked: `[-0.4, 0.4]` → `[-0.6, 0.6]`.** Started
+  at the session-9 placeholder (confirmed comfortable, ~2in margin each
+  side), tested `[-0.6, 0.6]` next — user confirmed fully on screen with a
+  "perfect" glide both ways — and stopped there rather than pushing
+  further untested. `config/emotes.yaml` updated with the new bounds and a
+  session-10 comment explaining the eyeball process, since the session-9
+  comment's "conservative placeholder pending visual check" framing was
+  now stale.
+- **New finding, not previously known: `size` is not a stable baseline
+  value.** While chasing a `positionY`-vs-frame-edge question (see below),
+  `CurrentModelRequest` samples of `size` disagreed across a few minutes
+  (-81.4 twice back-to-back, then -87.1 later) even though `positionY`/
+  `rotation` stayed bit-identical across the same samples. Reads as VTS's
+  own idle animation subtly breathing the zoom, not this project's code.
+  Corrected `docs/rigging_check_list.md` item 2, which an earlier draft
+  this same session had written up as "fixed" based only on the first two,
+  coincidentally-close samples — flagged explicitly so the wrong version
+  doesn't get treated as settled. **Real implication for later:** a future
+  "chao flies closer to camera" feature can't snapshot `size` once and
+  treat it as *the* default; needs a live re-sample or a relative delta.
+- **Vertical range explored and recorded, not wired into code.**
+  `Fly`/`VTSFlySubscriber` still only move `positionX` — this was pure
+  reconnaissance for a possible future fly-Y feature, at the user's
+  request. First pass tested ±0.3 from the model's natural resting
+  baseline: comfortable margin on top, bottom ran close to the frame edge.
+  User asked to re-test from a **centered** `(0, 0)` position instead of
+  that natural baseline; ±0.3 from center under-used the room, ±0.5 gave
+  good margin both directions and was confirmed ("perfect... consider it
+  locked"). Written up as `docs/rigging_check_list.md` item 3, explicit
+  that it's a recorded reference value only — no `y_range` config key was
+  added to `emotes.yaml`, since nothing reads one yet and an unused config
+  field would misleadingly imply the feature exists. Also flagged the
+  asymmetry for whoever builds fly-Y later: `x_range` is relative to the
+  model's *natural resting position*, `y_range`'s reference point here was
+  a *centered* one — those aren't the same baseline, and a real
+  implementation needs to pick one deliberately.
+
+Not yet committed (this subsection's changes: `config/emotes.yaml`'s
+`x_range`, `docs/rigging_check_list.md` items 2 and 3, this note).
+
 ## Stopping point (end of session 9, 2026-08-11)
 
 Picked up session 8's TTS thread: Piper is now actually installed, not just
