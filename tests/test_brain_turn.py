@@ -250,3 +250,93 @@ async def _next_of_kind(sub: asyncio.Queue, kind: str) -> Event:
         event = await sub.get()
         if event.kind == kind:
             return event
+
+
+class FakeSpeaker:
+    """Records calls and, optionally, sleeps briefly per sentence -- enough
+    to prove __call__ actually waits for speech to drain rather than
+    returning while a fake "playback" is still in flight.
+    """
+
+    def __init__(self, delay_s: float = 0.0) -> None:
+        self.calls: list[str] = []
+        self.delay_s = delay_s
+
+    async def speak(self, sentence, *, turn_id, cancel):
+        if self.delay_s:
+            await asyncio.sleep(self.delay_s)
+        self.calls.append(sentence)
+
+
+async def test_speaker_receives_each_cleaned_sentence_in_order():
+    backend = FakeBackend(["[happy] One. Two."])
+    orchestrator, _events = make_orchestrator(backend)
+    speaker = FakeSpeaker()
+    orchestrator.speaker = speaker
+
+    await orchestrator(make_input_event("hi"), asyncio.Event(), "t1")
+
+    assert speaker.calls == ["One.", "Two."]
+
+
+async def test_call_awaits_speech_drain_before_returning():
+    backend = FakeBackend(["Hi there."])
+    orchestrator, _events = make_orchestrator(backend)
+    speaker = FakeSpeaker(delay_s=0.05)
+    orchestrator.speaker = speaker
+
+    await orchestrator(make_input_event("hi"), asyncio.Event(), "t1")
+
+    # If __call__ returned before the drain task finished, this would be
+    # empty -- the whole point of awaiting the sentinel in turn.py's
+    # `finally` block.
+    assert speaker.calls == ["Hi there."]
+
+
+async def test_cancelled_turn_still_drains_the_speech_queue_without_hanging():
+    class HangingBackend:
+        async def stream(self, system, messages, cancel):
+            yield "One. "
+            await cancel.wait()
+
+    orchestrator, _events = make_orchestrator(HangingBackend())
+    speaker = FakeSpeaker()
+    orchestrator.speaker = speaker
+    cancel = asyncio.Event()
+
+    task = asyncio.create_task(orchestrator(make_input_event("hi"), cancel, "t1"))
+    await asyncio.sleep(0)
+    cancel.set()
+    # await task alone would hang forever if turn.py's `finally` block
+    # didn't push the sentinel -- the timeout turns a hang into a failure
+    # instead of a stuck test run.
+    await asyncio.wait_for(task, timeout=1.0)
+
+    # "One." was queued before cancellation fired, so it still reaches the
+    # (fake) speaker -- turn.py's job is just to drain the queue, not decide
+    # what to skip; that's Speaker.speak()'s own cancel check (see
+    # test_speak_no_ops_when_already_cancelled in test_outputs_speech.py).
+    assert speaker.calls == ["One."]
+
+
+async def test_speech_failure_reports_an_error_instead_of_crashing_the_turn():
+    """A bad voice file or a PortAudio device error must not make an
+    otherwise-successful text turn look like it raised -- brain.complete
+    already published by the time the drain task (awaited from __call__'s
+    own `finally`) would otherwise propagate the exception.
+    """
+
+    class BrokenSpeaker:
+        async def speak(self, sentence, *, turn_id, cancel):
+            raise RuntimeError("model failed to load")
+
+    backend = FakeBackend(["Hi there."])
+    orchestrator, events = make_orchestrator(backend)
+    orchestrator.speaker = BrokenSpeaker()
+
+    await orchestrator(make_input_event("hi"), asyncio.Event(), "t1")
+
+    assert any(e.kind == Kind.BRAIN_COMPLETE for e in events)
+    error = next(e for e in events if e.kind == Kind.ERROR)
+    assert "model failed to load" in error.payload["message"]
+    assert error.turn_id == "t1"

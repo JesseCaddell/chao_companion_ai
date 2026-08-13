@@ -26,6 +26,7 @@ from chao.brain.backend import LLMBackend
 from chao.brain.prompt import CurrentEvent, EventSource, Prompt, Turn, assemble_prompt
 from chao.director.director import Director
 from chao.events import Event, Kind
+from chao.outputs.speech import Speaker
 
 _SOURCE_BY_KIND: dict[str, EventSource] = {
     Kind.INPUT_CHAT: "chat",
@@ -42,6 +43,10 @@ class TurnOrchestrator:
     identity: str = ""
     personality: str = ""
     memory: str = ""
+    # None means TTS isn't configured -- same graceful-degrade shape as a
+    # VTS connection that never came up: the chat loop still works, it
+    # just doesn't speak.
+    speaker: Speaker | None = None
     # Turns, not exchanges (2 Turns/exchange, always appended as a pair) —
     # keep this even, or a popleft() can strip the pairing and leave
     # history starting with an assistant Turn, which the Anthropic API
@@ -84,55 +89,118 @@ class TurnOrchestrator:
         raw_chunks: list[str] = []
         cleaned_chunks: list[str] = []
 
-        async for chunk in self.backend.stream(prompt.system, prompt.messages, cancel):
-            raw_chunks.append(chunk)
-            self.publish(Event(kind=Kind.BRAIN_TOKEN, turn_id=turn_id, payload={"text": chunk}))
-            cleaned_chunks.extend(self.director.process_chunk(chunk))
+        # Sentences are handed to the speaker as Director completes them,
+        # drained by a separate task so synthesis/playback never stalls
+        # token streaming (see Speaker's docstring for why this is a direct
+        # handoff, not a bus event). __call__ still awaits the drain task
+        # before returning -- bus.py's arbiter treats a returned handler as
+        # "turn over," so returning while audio is still playing would let
+        # a new turn start speaking over it and would start the 15s speech
+        # cooldown from the wrong moment.
+        speech_queue: asyncio.Queue[str | None] | None = None
+        speech_task: asyncio.Task[None] | None = None
+        if self.speaker is not None:
+            speech_queue = asyncio.Queue()
+            speech_task = asyncio.create_task(self._drain_speech(speech_queue, turn_id, cancel))
 
-        if cancel.is_set():
-            # Aborted mid-stream. Whatever already streamed was legitimate
-            # (its director.tag/emote events already published above) but
-            # the unflushed remainder is abandoned, not completed — no
-            # brain.complete, no history entry. The next turn's
-            # begin_turn() resets Director's buffer, so nothing leaks.
-            return
+        try:
+            async for chunk in self.backend.stream(prompt.system, prompt.messages, cancel):
+                raw_chunks.append(chunk)
+                self.publish(Event(kind=Kind.BRAIN_TOKEN, turn_id=turn_id, payload={"text": chunk}))
+                sentences = self.director.process_chunk(chunk)
+                cleaned_chunks.extend(sentences)
+                if speech_queue is not None:
+                    for sentence in sentences:
+                        speech_queue.put_nowait(sentence)
 
-        final = self.director.end_turn()
-        if final:
-            cleaned_chunks.append(final)
+            if cancel.is_set():
+                # Aborted mid-stream. Whatever already streamed was
+                # legitimate (its director.tag/emote events already
+                # published above) but the unflushed remainder is
+                # abandoned, not completed — no brain.complete, no history
+                # entry. The next turn's begin_turn() resets Director's
+                # buffer, so nothing leaks.
+                return
 
-        full_text = "".join(raw_chunks)
-        latency_ms = (time.monotonic() - start) * 1000
+            final = self.director.end_turn()
+            if final:
+                cleaned_chunks.append(final)
+                if speech_queue is not None:
+                    speech_queue.put_nowait(final)
 
-        self.publish(
-            Event(
-                kind=Kind.BRAIN_COMPLETE,
-                turn_id=turn_id,
-                payload={
-                    "full_text": full_text,
-                    "latency_ms": latency_ms,
-                    "usage": None,  # not exposed by LLMBackend yet
-                },
+            full_text = "".join(raw_chunks)
+            latency_ms = (time.monotonic() - start) * 1000
+
+            self.publish(
+                Event(
+                    kind=Kind.BRAIN_COMPLETE,
+                    turn_id=turn_id,
+                    payload={
+                        "full_text": full_text,
+                        "latency_ms": latency_ms,
+                        "usage": None,  # not exposed by LLMBackend yet
+                    },
+                )
             )
-        )
 
-        # A reply that's empty after tag-stripping (backend yielded nothing,
-        # or the model emitted only a tag) must not become a Message with
-        # empty content — the Anthropic API rejects that with a 400, which
-        # CircuitBreakerBackend would read as a pre-first-token failure and
-        # fall back for every turn from here on, using the same poisoned
-        # history. brain.complete above still reports the real full_text
-        # (possibly ""); only the history entry is skipped.
-        reply = " ".join(c for c in cleaned_chunks if c).strip()
-        if reply:
-            # prompt.messages[-1] is the current event already
-            # wrapped/labelled by assemble_prompt — reused here so
-            # untrusted-chat labelling survives into history instead of
-            # being lost on the next turn.
-            self._history.append(Turn(role="user", text=prompt.messages[-1].content))
-            self._history.append(Turn(role="assistant", text=reply))
-            while len(self._history) > self.history_limit:
-                self._history.popleft()
+            # A reply that's empty after tag-stripping (backend yielded
+            # nothing, or the model emitted only a tag) must not become a
+            # Message with empty content — the Anthropic API rejects that
+            # with a 400, which CircuitBreakerBackend would read as a
+            # pre-first-token failure and fall back for every turn from
+            # here on, using the same poisoned history. brain.complete
+            # above still reports the real full_text (possibly ""); only
+            # the history entry is skipped.
+            reply = " ".join(c for c in cleaned_chunks if c).strip()
+            if reply:
+                # prompt.messages[-1] is the current event already
+                # wrapped/labelled by assemble_prompt — reused here so
+                # untrusted-chat labelling survives into history instead of
+                # being lost on the next turn.
+                self._history.append(Turn(role="user", text=prompt.messages[-1].content))
+                self._history.append(Turn(role="assistant", text=reply))
+                while len(self._history) > self.history_limit:
+                    self._history.popleft()
+        finally:
+            # Runs on every exit path, including the cancel-branch return
+            # above: the sentinel guarantees _drain_speech terminates
+            # instead of blocking on queue.get() forever, and awaiting it
+            # here is what makes turn lifetime honest (see comment above).
+            # Already-queued sentences past a cancellation point still get
+            # popped, but Speaker.speak() checks the same cancel token
+            # first thing and no-ops instead of synthesizing/playing them.
+            if speech_queue is not None and speech_task is not None:
+                speech_queue.put_nowait(None)
+                await speech_task
+
+    async def _drain_speech(
+        self, queue: asyncio.Queue[str | None], turn_id: str, cancel: asyncio.Event
+    ) -> None:
+        """A `speaker.speak()` failure (bad voice file, PortAudio device
+        error) must not surface as *this turn* raising: `__call__` awaits
+        this task from inside its own `finally`, after `brain.complete` has
+        already published successfully, so letting the exception propagate
+        there would report a fully-successful text turn as a crash. Report
+        it as its own error and stop trying for the rest of the turn
+        instead -- a broken voice model won't fix itself mid-sentence, and
+        the next turn gets a fresh attempt.
+        """
+        assert self.speaker is not None
+        while True:
+            sentence = await queue.get()
+            if sentence is None:
+                return
+            try:
+                await self.speaker.speak(sentence, turn_id=turn_id, cancel=cancel)
+            except Exception as e:  # noqa: BLE001 - any speech failure reports and stops, never crashes the turn
+                self.publish(
+                    Event(
+                        kind=Kind.ERROR,
+                        turn_id=turn_id,
+                        payload={"message": f"speech failed: {e}"},
+                    )
+                )
+                return
 
 
 def _current_event_from(event: Event) -> CurrentEvent:

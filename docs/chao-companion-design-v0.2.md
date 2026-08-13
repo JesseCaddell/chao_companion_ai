@@ -744,7 +744,7 @@ Phase 2 also needs a stream-facing subtitle overlay — separate from the dashbo
 | Twitch | `twitchio` |
 | VAD | `silero-vad` |
 | STT | `faster-whisper` base, int8, **CPU** |
-| TTS | Piper (CPU) — confirmed at phase 2 kickoff; voice selection still open (§19) |
+| TTS | Piper (CPU) — confirmed at phase 2 kickoff; wired into the live turn pipeline session 10, voice selection still config-only (§19) |
 | LLM (cloud) | Small/fast tier, streaming, prompt caching on |
 | LLM (local) | Ollama (`qwen3:8b`), CPU-only via `OLLAMA_NUM_GPU=0` — see §5.2 |
 | Embeddings | `bge-small-en` or `all-MiniLM-L6-v2`, CPU |

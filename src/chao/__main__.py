@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import uvicorn
@@ -33,11 +34,15 @@ from chao.director.aliveness import Aliveness, Fly, FlyConfig, load_fly_config
 from chao.director.director import Director, EmoteConfig, load_emote_config
 from chao.director.mood import Mood, MoodConfig, load_mood_config
 from chao.events import Event, Kind
+from chao.outputs.audio import AudioPlayer, resolve_output_device
+from chao.outputs.speech import Speaker, TTSConfig, load_tts_config
+from chao.outputs.tts import PiperBackend
 from chao.outputs.vts import VTSClient, VTSEmoteSubscriber, VTSFlySubscriber
 
 CONFIG_DIR = Path("config")
 IDENTITY_PATH = CONFIG_DIR / "identity.md"
 EMOTES_PATH = CONFIG_DIR / "emotes.yaml"
+CHAO_CONFIG_PATH = CONFIG_DIR / "chao.yaml"
 
 # Confirmed installed and working (see SESSION_STATE.md) — pulled via
 # `ollama pull qwen3:8b`, CPU-only (OLLAMA_NUM_GPU=0), models stored on
@@ -50,7 +55,10 @@ def build_pipeline(
     *, identity: str, emote_config: EmoteConfig, backend: LLMBackend
 ) -> tuple[Bus, TurnOrchestrator]:
     """All the wiring, dependency-injected — reused by main() with real
-    backends and by tests with fakes.
+    backends and by tests with fakes. Callers that want TTS set
+    `orchestrator.speaker` afterward (needs `bus.publish`, which doesn't
+    exist until the `Bus()` constructed in here) -- same reasoning as
+    `main()`'s `_build_speaker` call below.
     """
     bus = Bus()
     director = Director(emote_config=emote_config, publish=bus.publish)
@@ -58,6 +66,24 @@ def build_pipeline(
         backend=backend, director=director, publish=bus.publish, identity=identity
     )
     return bus, orchestrator
+
+
+def _build_speaker(tts_config: TTSConfig, publish: Callable[[Event], None]) -> Speaker | None:
+    """Degrades gracefully, same shape as `_run_vts_subscriber`'s "VTS
+    unavailable" handling: a missing/unset voice file shouldn't crash the
+    app, just leave the chao silent.
+    """
+    if not tts_config.voice_path:
+        print("  (no tts.voice_path configured in config/chao.yaml, chao won't speak)")
+        return None
+    voice_path = Path(tts_config.voice_path)
+    if not voice_path.exists():
+        print(f"  (voice model not found at {voice_path}, chao won't speak)")
+        return None
+    backend = PiperBackend(voice_path)
+    device = resolve_output_device(tts_config.output_device)
+    player = AudioPlayer(device=device)
+    return Speaker(backend=backend, player=player, publish=publish)
 
 
 async def _print_errors(sub: asyncio.Queue[Event]) -> None:
@@ -199,6 +225,7 @@ async def main() -> None:
     emote_config = load_emote_config(EMOTES_PATH)
     mood_config = load_mood_config(EMOTES_PATH)
     fly_config = load_fly_config(EMOTES_PATH)
+    tts_config = load_tts_config(CHAO_CONFIG_PATH)
 
     cloud = AnthropicBackend()  # reads ANTHROPIC_API_KEY from the environment
     local = OllamaBackend(os.environ.get("CHAO_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL))
@@ -207,6 +234,7 @@ async def main() -> None:
     bus, orchestrator = build_pipeline(
         identity=identity, emote_config=emote_config, backend=backend
     )
+    orchestrator.speaker = _build_speaker(tts_config, bus.publish)
 
     error_task = asyncio.create_task(_print_errors(bus.subscribe()))
     dashboard_task = asyncio.create_task(_run_dashboard_server(bus))

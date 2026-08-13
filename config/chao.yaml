@@ -1,0 +1,18 @@
+# App-level config not tied to emote/mood/fly tuning (those live in
+# emotes.yaml). See design doc §18.
+
+tts:
+  # Path to the Piper .onnx model; a same-named .onnx.json config must sit
+  # next to it (Piper's own convention -- both files are gitignored under
+  # data/voices/, same treatment as chao.db/vts_token.txt). Session 8's
+  # placeholder pick, verified working end-to-end in session 9. Swapping in
+  # the custom voice being trained separately is just changing this path --
+  # no code change (see SESSION_STATE.md, session 8).
+  voice_path: data/voices/en_US-amy-medium.onnx
+
+  # Case-insensitive substring match against sounddevice's output device
+  # list -- "CABLE Input" for VB-Audio Virtual Cable (design doc §18's audio
+  # routing choice). null falls back to the system default output device,
+  # which is deliberately not an error (see outputs/audio.py's
+  # resolve_output_device) -- useful for local testing without OBS running.
+  output_device: null

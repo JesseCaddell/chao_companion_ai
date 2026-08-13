@@ -4,6 +4,147 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
+## Stopping point (session 10, 2026-08-13, in progress)
+
+Picked up with a custom Piper voice (`.onnx`, user-trained) ready for
+testing, plus a review of the not-yet-implemented
+`docs/tts_pronunciation_overrides.md` design note.
+
+**Pronunciation fix implemented and wired in.** `outputs/tts.py` now has
+`_fix_pronunciation`/`_PRONUNCIATION` (currently just `chao`→`chow`,
+`chao's`→`chow's`), applied inside `PiperBackend.synthesize` right before
+the text hits Piper. Caught a real bug in the design doc's own draft regex
+(`r"\b[\w']+\b"`) before implementing: it swept a trailing quote-apostrophe
+into the match (`'chao'` → token `chao'`, dict miss, fix silently didn't
+fire). Shipped `r"\b[A-Za-z]+(?:'[A-Za-z]+)?\b"` instead — apostrophe only
+*between* letters. Doc updated to "Implemented," code sample corrected, bug
+noted inline so it doesn't get silently re-copied later. 6 new tests.
+
+**TTS wired into the live pipeline** — the bigger, deliberately-deferred
+piece from session 9. Consulted `advisor` before designing, per this
+project's established pattern for anything touching turn.py's
+cancellation-critical path (invariant 5). Its guidance shaped the whole
+design; two points mattered most:
+
+- **TTS input source:** `Speaker` (new, `outputs/speech.py`) is fed cleaned
+  sentences directly by `TurnOrchestrator` as `Director.process_chunk`
+  produces them — **not** a bus subscriber. Nothing on the bus carries
+  cleaned/tag-stripped sentence text (`brain.token` is deliberately raw;
+  `brain.complete.full_text` is also raw and arrives too late for §12's
+  sentence-streaming budget). Adding a `director.sentence` event kind to
+  carry it would have been an Event schema change — an explicit
+  CLAUDE.md Opus-escalation trigger — for something a direct method call
+  does with no schema change at all, since `OUTPUT_SPEECH_START/END`
+  already existed in `events.py` with their payload shape already
+  specified in design doc §13.
+- **Turn lifetime honesty:** `TurnOrchestrator.__call__` pushes each
+  cleaned sentence onto a per-turn `asyncio.Queue`, drained by a separate
+  task (`_drain_speech`) so synthesis/playback never stalls token
+  streaming or emote firing — but `__call__` still *awaits that task*
+  before returning (in a `finally`, sentinel-terminated, so it can't hang
+  and always runs even on the cancel-branch early return). Reasoning:
+  `bus.py`'s arbiter treats a returned handler as "turn over" — returning
+  while audio is still playing would let a new turn start speaking over
+  the old one and would start the 15s speech cooldown from the wrong
+  moment.
+
+**New files:**
+- `outputs/audio.py` — `AudioPlayer` (cancellable playback: starts via
+  `sd.play`, polls `cancel` on a 20ms interval calling `sd.stop()` the
+  instant it fires, rather than the obvious-but-wrong
+  `run_in_executor(None, sd.wait)`, which would just move the
+  uninterruptible wait onto a thread instead of removing it — invariant 5
+  again). `resolve_output_device(name_substring)` finds VB-Audio Virtual
+  Cable (or any device) by case-insensitive name match, `None` (system
+  default) if unset/not found — same graceful-degrade shape as
+  `_run_vts_subscriber`'s "VTS unavailable" handling. Sink is injectable
+  (`SoundDeviceSink` real impl, fakes in tests) — no PortAudio needed to
+  run the suite.
+- `outputs/speech.py` — `Speaker.speak(sentence, *, turn_id, cancel)`:
+  synthesizes via `PiperBackend`, publishes `output.speech_start` (payload:
+  **original** spelling + `duration_ms`, never the pronunciation-fixed
+  text — confirmed by test, since that event feeds the dashboard/session
+  log/eventual episodes table and a leaked "chow" would become
+  self-reinforcing per the pronunciation doc's own invariants), plays via
+  `AudioPlayer`, publishes `output.speech_end` — skipped if playback was
+  cut short by cancellation rather than completing, so a `speech_end` never
+  implies "this was actually heard." No-ops on blank text (a tag-only
+  sentence cleans to `""`) or an already-cancelled turn. Also holds
+  `TTSConfig`/`load_tts_config` (`voice_path`, `output_device`, read from
+  `config/chao.yaml`'s new `tts:` block) — voice/device are config per
+  CLAUDE.md, and this is specifically what makes the custom-voice swap
+  (see below) a config-only change, per session 8's plan.
+
+**Changed files:**
+- `brain/turn.py` — `TurnOrchestrator` gets a `speaker: Speaker | None =
+  None` field (`None` = not configured, same graceful-degrade shape as
+  everything else optional in this pipeline); `__call__` wired per the
+  queue/drain design above.
+- `__main__.py` — `_build_speaker(tts_config, publish)` constructs a real
+  `Speaker` from `config/chao.yaml`, or returns `None` with a printed
+  warning if `voice_path` is unset or the file doesn't exist (mirrors
+  `_run_vts_subscriber`'s degrade-not-crash handling). Wired via
+  `orchestrator.speaker = _build_speaker(...)` after `build_pipeline()`
+  returns, since building a real `Speaker` needs `bus.publish`, which
+  doesn't exist until `build_pipeline()`'s internal `Bus()` does.
+- `config/chao.yaml` — was completely empty; now holds the `tts:` block
+  (`voice_path: data/voices/en_US-amy-medium.onnx`, `output_device: null`
+  i.e. system default). This is the file the custom voice gets pointed at.
+- `uv add sounddevice` — PortAudio bindings, CPU-only, no GPU (invariant
+  1). Its playback is the "audio callback" case CLAUDE.md's no-threads
+  rule already carves out.
+
+**Deliberately not built this pass**, same "only what has a real consumer"
+discipline as session 9's timescale loop: §8.1 envelope extraction (RMS@60Hz
+→ body bob/head nod) — no bound VTS parameters exist for bob/nod yet, same
+phase-0 manual-binding blocker as everything else in that category;
+`AudioChunk.samples` is already the right seam, untouched. Also not
+touched: rescheduling `director.py`'s emote firing onto the audio playback
+clock (`_maybe_fire_emote`'s long-documented seam) — now *possible* since
+`speech_start` is real, but changes emote timing that's already visually
+confirmed working, so left as a separate, deliberate future change.
+
+**Verified without playing real audio through the user's speakers
+unprompted:** imported the real wiring path end-to-end against the actual
+`config/chao.yaml` and the existing `en_US-amy-medium.onnx` — `_build_speaker`
+constructs a real `Speaker` successfully; confirmed graceful `None` +
+warning for both an unset `voice_path` and a `voice_path` pointing at a
+nonexistent file. Not yet confirmed with actual sound coming out of the
+virtual cable — that's the natural next live check, ideally with the
+user's custom voice once it's dropped into `data/voices/`.
+
+**Second advisor pass, after the design above landed, caught two real gaps
+and one worth a comment:**
+- **Fixed:** a `speaker.speak()` failure (bad voice file, PortAudio device
+  error — the single most likely failure mode right now, given the next
+  step is pointing `voice_path` at a brand-new custom onnx) would have
+  propagated out of `__call__`'s `finally` *after* `brain.complete` already
+  published successfully, making a fully-successful text turn report as a
+  crashed one. `_drain_speech` now catches, publishes a `Kind.ERROR` with
+  `turn_id` (visible in `_print_errors`/the dashboard), and stops trying
+  for the rest of that turn — the next turn gets a fresh attempt.
+- **Fixed:** `resolve_output_device` returning `None` on a *requested but
+  not found* device name was silent — unlike `_run_vts_subscriber`'s "VTS
+  unavailable" precedent it claimed to follow. Live impact if it ever
+  fires: the chao's voice comes out the user's speakers instead of into
+  OBS via the virtual cable (and back into the mic path if monitored),
+  with nothing anywhere explaining why. Now prints a warning before
+  falling back.
+- **Noted, not changed:** `AudioPlayer`/`SoundDeviceSink` ride sounddevice's
+  one module-level stream, so `stop()` in `play()`'s `finally` stops
+  *whatever* is currently playing, not specifically that call's clip. Fine
+  today (one `Speaker`, strictly sequential playback); flagged in
+  `audio.py`'s docstring so a future second concurrent caller doesn't
+  assume isolation it doesn't have.
+
+25 new tests (6 pronunciation, 5 `outputs/audio.py`, 8 `outputs/speech.py`,
+6 `brain/turn.py` speaker-wiring), full suite at 179 passed, ruff clean.
+Not yet committed — pronunciation fix and TTS wiring are two logically
+separate units; plan is to land them as two commits, not one, per CLAUDE.md's
+commit-hygiene note (batch *related* changes, not unrelated ones together).
+`pyproject.toml`/`uv.lock`'s `sounddevice` addition belongs with the wiring
+commit, not the pronunciation one.
+
 ## Stopping point (end of session 9, 2026-08-11)
 
 Picked up session 8's TTS thread: Piper is now actually installed, not just
