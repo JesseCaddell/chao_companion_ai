@@ -576,7 +576,7 @@ session logging beyond what `Kind.BRAIN_COMPLETE`/`OUTPUT_SPEECH_*`
 already give the dashboard/JSONL log — all still open per design doc §15,
 not yet scoped with the user this pass.
 
-Not yet committed at time of writing.
+Committed (`1bec92f`).
 
 Picked up with a custom Piper voice (`.onnx`, user-trained) ready for
 testing, plus a review of the not-yet-implemented
