@@ -21,7 +21,7 @@ class FakeBackend:
 
 def default_emote_config() -> EmoteConfig:
     return EmoteConfig(
-        pools={"happy": EmotePool(hotkeys=["chao.happy"], cooldown_s=4.0, duration_s=2.5)}
+        pools={"happy_eyes": EmotePool(hotkeys=["chao.happy"], cooldown_s=4.0, duration_s=2.5)}
     )
 
 
@@ -95,7 +95,7 @@ async def test_emote_fires_via_director_during_turn():
     assert any(e.kind == Kind.DIRECTOR_TAG for e in events)
     emote = next(e for e in events if e.kind == Kind.DIRECTOR_EMOTE)
     assert emote.turn_id == "t1"
-    assert emote.payload["pool"] == "happy"
+    assert emote.payload["pool"] == "happy_eyes"
 
 
 async def test_history_strips_tags_but_full_text_keeps_them():

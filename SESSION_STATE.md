@@ -799,6 +799,68 @@ manual-binding step this project has needed), and (b) `EmotePool`/
 `{channel: expression_file}` dict, not one scalar) instead of globally.
 Discussed with the user, not yet built or scoped further this session.
 
+### Session 10, part 14: per-channel emote split (`docs/chao_expressions.md`)
+
+User did the VTS-side work discussed above: renamed/authored genuinely
+separate eyes-only and ball-only expression files and documented the
+final set in `docs/chao_expressions.md` --
+
+| Eyes (mood, sustained) | Ball (cognition, beat-level) |
+|---|---|
+| `happy_eyes`, `sad_eyes`, `angry_eyes`, `confused_eyes` | `question_bub`, `surprise_bub`, `confused_bub`, `heart_bub` |
+
+Notably `confused` is the only tag with **both** an eyes and a ball
+expression (`confused_eyes` + `confused_bub`, the ball side being the
+"swirl"/corkscrew per design doc §6.1's ball vocabulary) -- every other
+tag maps to exactly one channel.
+
+**`EmotePool` gets a `channel` field** (`"eyes"` or `"ball"`, default
+`"eyes"`), read by `load_emote_config`. **`_TAG_TO_POOL` changed from
+`tag -> pool_name` to `tag -> tuple[pool_name, ...]`** so `confused` can
+fire two pools; `Director._maybe_fire_emote` now loops and dispatches to
+a new `_fire_pool` helper, with each pool keeping its own independent
+cooldown/hotkey-alternation state (one pool being on cooldown doesn't
+hold back its sibling from the same tag -- covered by a dedicated test).
+
+**`VTSEmoteSubscriber`'s mutual exclusion, from part 13, changed from
+global to per-channel**: `_active_expression` is now `dict[str, str]`
+keyed by channel instead of one scalar. Activating a new expression only
+deactivates whatever was active *in the same channel* -- eyes and ball
+can run simultaneously now (the thing part 13's global fix accidentally
+prevented), while two pools in the *same* channel still exclude each
+other correctly.
+
+**`config/emotes.yaml`** fully restructured: 8 pools (was 7, `heart`
+renamed `heart_bub`), each with `hotkeys`/`cooldown_s`/`duration_s`
+carried over from its predecessor pool plus the new `channel` field;
+`reactions:` block updated to the new pool names (`anticipation`/
+`name_mention`/`thinking` -> `question_bub`, `chat_spike` -> `surprise_bub`,
+`new_follower`/`streamer_laugh` -> `happy_eyes`, `long_silence` ->
+`sad_eyes`). Hotkey filenames assumed `<name>.exp3.json` matching
+`docs/chao_expressions.md`'s naming exactly, not yet confirmed against
+VTS before the live check below (see next paragraph -- confirmed).
+
+**10 new/updated tests** across `test_director_director.py` (channel
+parsing, the two-pool-per-tag `confused` case firing both pools with
+independent cooldowns, the real-file test updated to the new pool names)
+and `test_outputs_vts.py` (same-channel exclusion still works, different
+channels *don't* exclude each other, `_active_expression`'s dict shape).
+Several existing test fixtures across `test_director_director.py`,
+`test_brain_turn.py`, and `test_main.py` needed their local `happy`-named
+pools renamed to `happy_eyes` to keep matching `_TAG_TO_POOL`'s new
+target names. Full suite: **298 passed**, ruff clean, format clean.
+
+**Live-verified against real VTS**, real config/emotes.yaml, real
+`VTSEmoteSubscriber` -- three parts: (1) `confused_eyes` + `confused_bub`
+fired together, simulating a real `[confused]` tag -- both should show
+at once, the main thing this part was for; (2) `happy_eyes` then
+`question_bub` -- different channels, both should stay active together;
+(3) `happy_eyes` then `sad_eyes` -- same channel, happy should turn off
+right as sad turns on. **User: "ran it. All tests passed."** — no
+`ExpressionActivationRequest` errors, confirming every assumed filename
+in `docs/chao_expressions.md`'s naming matched the real VTS files, and
+the channel split/exclusion behaved exactly as designed.
+
 Picked up with a custom Piper voice (`.onnx`, user-trained) ready for
 testing, plus a review of the not-yet-implemented
 `docs/tts_pronunciation_overrides.md` design note.

@@ -44,7 +44,7 @@ class SuspendingFakeBackend:
 
 def default_emote_config() -> EmoteConfig:
     return EmoteConfig(
-        pools={"happy": EmotePool(hotkeys=["chao.happy"], cooldown_s=4.0, duration_s=2.5)}
+        pools={"happy_eyes": EmotePool(hotkeys=["chao.happy"], cooldown_s=4.0, duration_s=2.5)}
     )
 
 
@@ -96,7 +96,7 @@ async def test_build_pipeline_fires_emotes_via_director():
     except asyncio.CancelledError:
         pass
 
-    assert emote.payload["pool"] == "happy"
+    assert emote.payload["pool"] == "happy_eyes"
 
 
 async def test_aliveness_fires_anticipation_emote_on_a_real_bus():

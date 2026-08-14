@@ -1,13 +1,21 @@
 # Emote pools, hotkey selection, and reaction mapping. See design doc §14.
 #
-# `hotkeys` values are confirmed live against this model's VTS instance
-# (queried via ExpressionStateRequest/HotkeysInCurrentModelRequest,
-# 2026-08-07) — they're the real expression FILE names, e.g.
-# "happy.exp3.json", not arbitrary hotkey labels. CLAUDE.md's phase-0
-# finding is that emotes fire via ExpressionActivationRequest (explicit
-# active: true/false), not HotkeyTriggerRequest — a hotkey with the same
-# name exists 1:1 per expression but outputs/vts.py should call the
-# expression file directly, not trigger the hotkey.
+# `hotkeys` values are the real expression FILE names, e.g. "happy_eyes
+# .exp3.json", not arbitrary hotkey labels. CLAUDE.md's phase-0 finding is
+# that emotes fire via ExpressionActivationRequest (explicit active:
+# true/false), not HotkeyTriggerRequest — a hotkey with the same name
+# exists 1:1 per expression but outputs/vts.py should call the expression
+# file directly, not trigger the hotkey.
+#
+# Session 10 part 14: pools split into genuinely eyes-only or ball-only
+# expression files (docs/chao_expressions.md — user-authored, VTS-side
+# work), matching design doc's Expression model for real instead of one
+# bundled file per pool. `channel: eyes` (sustained mood) or `channel:
+# ball` (beat-level cognition) — outputs/vts.py's VTSEmoteSubscriber
+# enforces mutual exclusion *within* a channel, not across channels, so
+# eyes and ball can run simultaneously now. Filenames below assume
+# `<name>.exp3.json` matching docs/chao_expressions.md's naming exactly —
+# not yet live-verified against the actual renamed VTS files.
 #
 # `neutral` has NO matching expression in VTS yet — confirmed missing,
 # not just unverified. Nothing currently fires it (no tag maps to
@@ -22,18 +30,20 @@
 # isn't built yet. `reactions` maps a non-verbal-only trigger (§10.4) to a
 # pool; aliveness.py's Aliveness.handle reads `reactions.anticipation` to
 # drive the §10.5 anticipation nudge (question mark on brain.request,
-# before any audio exists) — the only reaction wired up so far. The rest of
-# this block is still aspirational.
+# before any audio exists) and `reactions.chat_spike` (session 10 part 10)
+# — the only two reactions wired up so far. The rest of this block is
+# still aspirational.
 
 pools:
-  happy:      { hotkeys: [happy.exp3.json], cooldown_s: 4, duration_s: 2.5 }
-  heart:      { hotkeys: [heart.exp3.json], cooldown_s: 12, duration_s: 3.0 }
-  curious:    { hotkeys: [question.exp3.json], cooldown_s: 3, duration_s: 2.0 }
-  surprise:   { hotkeys: [surprise.exp3.json], cooldown_s: 6, duration_s: 1.5 }
-  confused:   { hotkeys: [confused.exp3.json], cooldown_s: 8, duration_s: 3.0 }
-  sad:        { hotkeys: [sad.exp3.json], cooldown_s: 10, duration_s: 4.0 }
-  angry:      { hotkeys: [angry.exp3.json], cooldown_s: 15, duration_s: 3.0 }
-  neutral:    { hotkeys: [], cooldown_s: 0, duration_s: 0 }  # pending: no VTS expression yet
+  happy_eyes:    { hotkeys: [happy_eyes.exp3.json], cooldown_s: 4, duration_s: 2.5, channel: eyes }
+  sad_eyes:      { hotkeys: [sad_eyes.exp3.json], cooldown_s: 10, duration_s: 4.0, channel: eyes }
+  angry_eyes:    { hotkeys: [angry_eyes.exp3.json], cooldown_s: 15, duration_s: 3.0, channel: eyes }
+  confused_eyes: { hotkeys: [confused_eyes.exp3.json], cooldown_s: 8, duration_s: 3.0, channel: eyes }
+  question_bub:  { hotkeys: [question_bub.exp3.json], cooldown_s: 3, duration_s: 2.0, channel: ball }
+  surprise_bub:  { hotkeys: [surprise_bub.exp3.json], cooldown_s: 6, duration_s: 1.5, channel: ball }
+  confused_bub:  { hotkeys: [confused_bub.exp3.json], cooldown_s: 8, duration_s: 3.0, channel: ball }
+  heart_bub:     { hotkeys: [heart_bub.exp3.json], cooldown_s: 12, duration_s: 3.0, channel: ball }
+  neutral:       { hotkeys: [], cooldown_s: 0, duration_s: 0, channel: eyes }  # pending: no VTS expression yet
 
 fly:
   hotkey: fly.exp3.json
@@ -66,11 +76,11 @@ mood:                    # §6, §10 -- mood.py's valence/arousal resting point 
                             # calls Mood.tick() on this timeout when no event arrives, so
                             # decay progresses and Fly can land during a quiet stretch.
 
-reactions:            # non-verbal only, no LLM call
-  anticipation:   curious   # §10.5 — wired up, see aliveness.py
-  chat_spike:     surprise
-  name_mention:   curious
-  new_follower:   happy
-  long_silence:   sad
-  streamer_laugh: happy
-  thinking:       curious
+reactions:                 # non-verbal only, no LLM call
+  anticipation:   question_bub   # §10.5 — wired up, see aliveness.py
+  chat_spike:     surprise_bub   # session 10 part 10 — wired up, see aliveness.py
+  name_mention:   question_bub
+  new_follower:   happy_eyes
+  long_silence:   sad_eyes
+  streamer_laugh: happy_eyes
+  thinking:       question_bub

@@ -41,15 +41,23 @@ from chao.events import Event, Kind
 # §6.2. `pause` and `look:*` are attention/motion signals, not emotes —
 # left out on purpose. `heart` isn't reachable via this table at all
 # (§6.3: affinity-gated, not a direct tag mapping).
-_TAG_TO_POOL: dict[str, str] = {
-    "happy": "happy",
-    "affection": "happy",
-    "curious": "curious",
-    "thinking": "curious",
-    "surprise": "surprise",
-    "confused": "confused",
-    "sad": "sad",
-    "angry": "angry",
+#
+# Session 10 part 14: values are tuples, not single pool names -- eyes
+# and ball are separate VTS expression files now (user split them after
+# the global mutual-exclusion fix turned out to be too blunt, see
+# outputs/vts.py). Most tags map to exactly one pool (one channel); only
+# `confused` maps to two -- it has both an eyes state and a ball icon
+# (the "swirl"/corkscrew per design doc §6.1's ball vocabulary). `heart`
+# is ball-only and still not reachable here, same as before.
+_TAG_TO_POOL: dict[str, tuple[str, ...]] = {
+    "happy": ("happy_eyes",),
+    "affection": ("happy_eyes",),
+    "curious": ("question_bub",),
+    "thinking": ("question_bub",),
+    "surprise": ("surprise_bub",),
+    "confused": ("confused_eyes", "confused_bub"),
+    "sad": ("sad_eyes",),
+    "angry": ("angry_eyes",),
 }
 
 
@@ -58,6 +66,11 @@ class EmotePool:
     hotkeys: list[str]
     cooldown_s: float
     duration_s: float
+    # "eyes" (sustained mood) or "ball" (beat-level cognition), design doc's
+    # Expression model. VTSEmoteSubscriber enforces mutual exclusion within
+    # a channel, not across channels -- eyes and ball can be active
+    # together, since that's what the two-channel design actually wants.
+    channel: str = "eyes"
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +91,7 @@ def load_emote_config(path: Path) -> EmoteConfig:
             hotkeys=list(raw.get("hotkeys", [])),
             cooldown_s=float(raw.get("cooldown_s", 0.0)),
             duration_s=float(raw.get("duration_s", 0.0)),
+            channel=str(raw.get("channel", "eyes")),
         )
         for name, raw in (data.get("pools") or {}).items()
     }
@@ -140,9 +154,19 @@ class Director:
         return cleaned
 
     def _maybe_fire_emote(self, tag: ParsedTag) -> None:
-        pool_name = _TAG_TO_POOL.get(_tag_key(tag))
-        if pool_name is None:
+        pool_names = _TAG_TO_POOL.get(_tag_key(tag))
+        if pool_names is None:
             return
+        for pool_name in pool_names:
+            self._fire_pool(pool_name, tag)
+
+    def _fire_pool(self, pool_name: str, tag: ParsedTag) -> None:
+        """One pool's worth of cooldown-gated firing -- split out from
+        `_maybe_fire_emote` so a tag mapping to more than one pool (e.g.
+        `confused` -> eyes + ball) fires each independently, with its own
+        cooldown/hotkey-alternation state. A pool on cooldown doesn't hold
+        back its sibling pool from the same tag.
+        """
         pool = self.emote_config.pools.get(pool_name)
         if pool is None or not pool.hotkeys:
             return

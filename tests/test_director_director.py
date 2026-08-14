@@ -10,12 +10,25 @@ def make_config(**pools: EmotePool) -> EmoteConfig:
 
 def default_config() -> EmoteConfig:
     return make_config(
-        happy=EmotePool(hotkeys=["chao.happy"], cooldown_s=4.0, duration_s=2.5),
-        curious=EmotePool(hotkeys=["chao.question"], cooldown_s=3.0, duration_s=2.0),
-        surprise=EmotePool(hotkeys=["chao.surprise"], cooldown_s=6.0, duration_s=1.5),
-        confused=EmotePool(hotkeys=["chao.confused"], cooldown_s=8.0, duration_s=3.0),
-        sad=EmotePool(hotkeys=["chao.sad"], cooldown_s=10.0, duration_s=4.0),
-        angry=EmotePool(hotkeys=["chao.angry"], cooldown_s=15.0, duration_s=3.0),
+        happy_eyes=EmotePool(
+            hotkeys=["chao.happy"], cooldown_s=4.0, duration_s=2.5, channel="eyes"
+        ),
+        question_bub=EmotePool(
+            hotkeys=["chao.question"], cooldown_s=3.0, duration_s=2.0, channel="ball"
+        ),
+        surprise_bub=EmotePool(
+            hotkeys=["chao.surprise"], cooldown_s=6.0, duration_s=1.5, channel="ball"
+        ),
+        confused_eyes=EmotePool(
+            hotkeys=["chao.confused_eyes"], cooldown_s=8.0, duration_s=3.0, channel="eyes"
+        ),
+        confused_bub=EmotePool(
+            hotkeys=["chao.confused_bub"], cooldown_s=8.0, duration_s=3.0, channel="ball"
+        ),
+        sad_eyes=EmotePool(hotkeys=["chao.sad"], cooldown_s=10.0, duration_s=4.0, channel="eyes"),
+        angry_eyes=EmotePool(
+            hotkeys=["chao.angry"], cooldown_s=15.0, duration_s=3.0, channel="eyes"
+        ),
     )
 
 
@@ -210,7 +223,9 @@ def test_cooldown_persists_across_begin_turn():
 def test_hotkey_never_repeats_consecutively_with_two_hotkeys():
     clock = FakeClock()
     config = make_config(
-        happy=EmotePool(hotkeys=["chao.happy_a", "chao.happy_b"], cooldown_s=1.0, duration_s=1.0)
+        happy_eyes=EmotePool(
+            hotkeys=["chao.happy_a", "chao.happy_b"], cooldown_s=1.0, duration_s=1.0
+        )
     )
     director, events = make_director(config=config, clock=clock)
     director.begin_turn("t1")
@@ -227,7 +242,9 @@ def test_hotkey_never_repeats_consecutively_with_two_hotkeys():
 
 def test_single_hotkey_pool_can_repeat():
     clock = FakeClock()
-    config = make_config(happy=EmotePool(hotkeys=["chao.happy"], cooldown_s=1.0, duration_s=1.0))
+    config = make_config(
+        happy_eyes=EmotePool(hotkeys=["chao.happy"], cooldown_s=1.0, duration_s=1.0)
+    )
     director, events = make_director(config=config, clock=clock)
     director.begin_turn("t1")
 
@@ -313,6 +330,73 @@ def test_load_emote_config_the_real_file():
     path = Path(__file__).resolve().parents[1] / "config" / "emotes.yaml"
     config = load_emote_config(path)
 
-    for tag_pool in ("happy", "curious", "surprise", "confused", "sad", "angry"):
+    for tag_pool in (
+        "happy_eyes",
+        "question_bub",
+        "surprise_bub",
+        "confused_eyes",
+        "confused_bub",
+        "sad_eyes",
+        "angry_eyes",
+    ):
         assert tag_pool in config.pools
-    assert config.reactions["anticipation"] == "curious"
+    assert config.reactions["anticipation"] == "question_bub"
+
+
+def test_load_emote_config_parses_channel(tmp_path):
+    config_path = tmp_path / "emotes.yaml"
+    config_path.write_text(
+        """
+pools:
+  happy_eyes: { hotkeys: [chao.happy], cooldown_s: 4, duration_s: 2.5, channel: eyes }
+  heart_bub: { hotkeys: [chao.heart], cooldown_s: 12, duration_s: 3.0, channel: ball }
+"""
+    )
+
+    config = load_emote_config(config_path)
+
+    assert config.pools["happy_eyes"].channel == "eyes"
+    assert config.pools["heart_bub"].channel == "ball"
+
+
+def test_load_emote_config_defaults_channel_to_eyes_when_absent(tmp_path):
+    config_path = tmp_path / "emotes.yaml"
+    config_path.write_text(
+        "pools:\n  happy_eyes: { hotkeys: [chao.happy], cooldown_s: 4, duration_s: 2.5 }\n"
+    )
+
+    config = load_emote_config(config_path)
+
+    assert config.pools["happy_eyes"].channel == "eyes"
+
+
+def test_confused_tag_fires_both_the_eyes_and_ball_pools():
+    director, events = make_director()
+    director.begin_turn("t1")
+
+    director.process_chunk("[confused] Huh? ")
+
+    emote_events = [e for e in events if e.kind == Kind.DIRECTOR_EMOTE]
+    assert {e.payload["pool"] for e in emote_events} == {"confused_eyes", "confused_bub"}
+    assert all(e.payload["reason"] == "confused" for e in emote_events)
+
+
+def test_confused_tags_two_pools_have_independent_cooldowns():
+    """One pool from a two-pool tag being on cooldown must not hold back
+    its sibling -- each pool tracks its own _last_fired independently.
+    """
+    clock = FakeClock()
+    config = make_config(
+        confused_eyes=EmotePool(hotkeys=["chao.eyes"], cooldown_s=100.0, duration_s=3.0),
+        confused_bub=EmotePool(hotkeys=["chao.bub"], cooldown_s=1.0, duration_s=3.0),
+    )
+    director, events = make_director(config=config, clock=clock)
+    director.begin_turn("t1")
+
+    director.process_chunk("[confused] One. ")
+    clock.advance(2.0)  # past confused_bub's 1.0s cooldown, well inside confused_eyes' 100s
+    director.process_chunk("[confused] Two. ")
+
+    pools_fired = [e.payload["pool"] for e in events if e.kind == Kind.DIRECTOR_EMOTE]
+    assert pools_fired.count("confused_eyes") == 1  # still cooling down
+    assert pools_fired.count("confused_bub") == 2  # fired both times

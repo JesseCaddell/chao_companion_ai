@@ -124,14 +124,22 @@ def make_config(duration_s: float = 2.0, cooldown_s: float = 4.0) -> EmoteConfig
     )
 
 
-def make_two_pool_config(duration_s: float = 2.0) -> EmoteConfig:
+def make_two_pool_config(
+    duration_s: float = 2.0, channels: tuple[str, str] = ("eyes", "eyes")
+) -> EmoteConfig:
     return EmoteConfig(
         pools={
             "curious": EmotePool(
-                hotkeys=["question.exp3.json"], cooldown_s=3.0, duration_s=duration_s
+                hotkeys=["question.exp3.json"],
+                cooldown_s=3.0,
+                duration_s=duration_s,
+                channel=channels[0],
             ),
             "confused": EmotePool(
-                hotkeys=["confused.exp3.json"], cooldown_s=8.0, duration_s=duration_s
+                hotkeys=["confused.exp3.json"],
+                cooldown_s=8.0,
+                duration_s=duration_s,
+                channel=channels[1],
             ),
         }
     )
@@ -222,7 +230,7 @@ async def test_deactivation_failure_publishes_error_without_raising():
     assert error.payload["component"] == "vts"
 
 
-# --- Global mutual exclusion (session 10 part 13: user-reported live overlap) ---
+# --- Per-channel mutual exclusion (session 10 parts 13-14: user-reported live overlap) ---
 
 
 async def test_second_pool_deactivates_the_first_before_activating():
@@ -248,14 +256,36 @@ async def test_second_pool_deactivates_the_first_before_activating():
     ]
 
 
-async def test_only_one_expression_active_after_two_different_pools_fire():
+async def test_only_one_expression_active_per_channel_after_two_same_channel_pools_fire():
     client = FakeVTSClient()
     sub = VTSEmoteSubscriber(client=client, emote_config=make_two_pool_config(), sleep=GatedSleep())
 
     await sub.handle(emote_event(pool="curious", hotkey_id="question.exp3.json"))
     await sub.handle(emote_event(pool="confused", hotkey_id="confused.exp3.json"))
 
-    assert sub._active_expression == "confused.exp3.json"
+    assert sub._active_expression == {"eyes": "confused.exp3.json"}
+
+
+async def test_different_channels_do_not_exclude_each_other():
+    client = FakeVTSClient()
+    config = make_two_pool_config(channels=("eyes", "ball"))
+    sub = VTSEmoteSubscriber(client=client, emote_config=config, sleep=GatedSleep())
+
+    await sub.handle(emote_event(pool="curious", hotkey_id="question.exp3.json"))
+    await sub.handle(emote_event(pool="confused", hotkey_id="confused.exp3.json"))
+
+    # No deactivate call for question.exp3.json -- eyes and ball ran together.
+    assert client.calls == [
+        (
+            "ExpressionActivationRequest",
+            {"expressionFile": "question.exp3.json", "active": True, "fadeTime": 0.25},
+        ),
+        (
+            "ExpressionActivationRequest",
+            {"expressionFile": "confused.exp3.json", "active": True, "fadeTime": 0.25},
+        ),
+    ]
+    assert sub._active_expression == {"eyes": "question.exp3.json", "ball": "confused.exp3.json"}
 
 
 async def test_same_file_reactivating_does_not_deactivate_itself():
@@ -300,7 +330,7 @@ async def test_active_expression_clears_after_natural_deactivation():
     await sub.handle(emote_event())
     await asyncio.sleep(0)  # background deactivate task runs to completion
 
-    assert sub._active_expression is None
+    assert sub._active_expression == {}
 
 
 async def test_second_activation_before_deactivate_extends_hold_not_double_deactivate():
