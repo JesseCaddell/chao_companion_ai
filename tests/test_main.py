@@ -1,6 +1,7 @@
 import asyncio
 
-from chao.__main__ import _run_mood, build_pipeline
+from chao.__main__ import _run_mood, _select_backend, build_pipeline
+from chao.brain.backend import CircuitBreakerBackend
 from chao.director.aliveness import Aliveness
 from chao.director.director import EmoteConfig, EmotePool
 from chao.director.mood import MoodConfig
@@ -53,6 +54,28 @@ async def _next_of_kind(sub: asyncio.Queue, kind: str) -> Event:
         event = await sub.get()
         if event.kind == kind:
             return event
+
+
+def test_select_backend_local_pins_local_directly():
+    cloud, local = FakeBackend([]), FakeBackend([])
+    assert _select_backend("local", cloud, local) is local
+
+
+def test_select_backend_cloud_pins_cloud_directly():
+    cloud, local = FakeBackend([]), FakeBackend([])
+    assert _select_backend("cloud", cloud, local) is cloud
+
+
+def test_select_backend_auto_wraps_in_circuit_breaker():
+    cloud, local = FakeBackend([]), FakeBackend([])
+    result = _select_backend("auto", cloud, local)
+    assert isinstance(result, CircuitBreakerBackend)
+
+
+def test_select_backend_unknown_value_falls_back_to_auto():
+    cloud, local = FakeBackend([]), FakeBackend([])
+    result = _select_backend("", cloud, local)
+    assert isinstance(result, CircuitBreakerBackend)
 
 
 async def test_build_pipeline_wires_manual_input_to_brain_complete():

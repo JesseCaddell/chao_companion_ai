@@ -1076,6 +1076,32 @@ the real OBS overlay — per advisor, the right check is a live conversation
 with the overlay open, watching for whether any asterisk text leaks
 through, not a unit test. Not yet committed.
 
+### Session 10, part 17: `CHAO_LLM_BACKEND` env var — manual cloud/local switch
+
+User wants to test the local Ollama backend directly and switch back and
+forth, rather than only getting local via `CircuitBreakerBackend`'s
+automatic failure/timeout fallback (the only path that existed before
+this). Small, self-contained change, no design-doc/invariant implications
+— proceeded directly, no advisor consult needed.
+
+`__main__.py` gains `_select_backend(choice, cloud, local)`: reads
+`CHAO_LLM_BACKEND` (`"local"` / `"cloud"` / unset or anything else =
+`"auto"`). `"local"`/`"cloud"` return that backend directly, bypassing
+`CircuitBreakerBackend` entirely so a pinned choice can't silently swap
+mid-test; anything else keeps today's auto-fallback behavior unchanged.
+Also relaxed the startup `ANTHROPIC_API_KEY` check to skip when
+`CHAO_LLM_BACKEND=local` — `AnthropicBackend` was already lazy about the
+key (only touches it on first `.stream()` call), so the only thing
+blocking a key-free local-only run was that early `SystemExit`.
+
+**Usage:** set `CHAO_LLM_BACKEND=local` in `.env` (or `$env:CHAO_LLM_BACKEND
+= "local"` for one PowerShell session) before `uv run python -m chao` to
+force the Ollama path; `cloud` to force Anthropic only; unset/remove it to
+go back to normal auto behavior. 4 new tests in `test_main.py`. Full suite
+319 passed, ruff clean. Not yet live-verified against a real local turn
+this session (user was about to test it live when this landed). Not yet
+committed.
+
 ### Session 10, part 16: directed fly — `[fly:left/right/center]`
 
 User asked, after watching a live conversation: can chao move around the

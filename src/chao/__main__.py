@@ -65,6 +65,20 @@ CHAO_CONFIG_PATH = CONFIG_DIR / "chao.yaml"
 DEFAULT_OLLAMA_MODEL = "qwen3:8b"
 
 
+def _select_backend(choice: str, cloud: LLMBackend, local: LLMBackend) -> LLMBackend:
+    """`CHAO_LLM_BACKEND` env var: "cloud" or "local" pins one backend
+    directly for the whole run (no `CircuitBreakerBackend` involved, so a
+    pinned choice can't silently swap under you mid-test -- the point when
+    deliberately testing one side). Anything else, including unset,
+    defaults to the normal auto-fallback behavior.
+    """
+    if choice == "local":
+        return local
+    if choice == "cloud":
+        return cloud
+    return CircuitBreakerBackend(cloud, local)
+
+
 def build_pipeline(
     *, identity: str, emote_config: EmoteConfig, backend: LLMBackend
 ) -> tuple[Bus, TurnOrchestrator]:
@@ -429,7 +443,8 @@ async def _read_stdin_into_bus(bus: Bus) -> None:
 async def main() -> None:
     load_dotenv()  # loads .env into os.environ if present; no-op otherwise
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    llm_backend_choice = os.environ.get("CHAO_LLM_BACKEND", "auto").strip().lower()
+    if llm_backend_choice != "local" and not os.environ.get("ANTHROPIC_API_KEY"):
         raise SystemExit("ANTHROPIC_API_KEY is not set — the cloud backend can't run.")
 
     identity = IDENTITY_PATH.read_text() if IDENTITY_PATH.exists() else ""
@@ -445,7 +460,7 @@ async def main() -> None:
 
     cloud = AnthropicBackend()  # reads ANTHROPIC_API_KEY from the environment
     local = OllamaBackend(os.environ.get("CHAO_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL))
-    backend = CircuitBreakerBackend(cloud, local)
+    backend = _select_backend(llm_backend_choice, cloud, local)
 
     bus, orchestrator = build_pipeline(
         identity=identity, emote_config=emote_config, backend=backend
