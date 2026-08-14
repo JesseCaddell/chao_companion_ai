@@ -54,5 +54,6 @@ class Kind:
 
     VTS_PARAM = "vts.param"
     STATE_FLY = "state.fly"
+    STATE_KILLED = "state.killed"
 
     ERROR = "error"

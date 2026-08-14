@@ -37,6 +37,7 @@ from chao.director.idle_drift import IdleDrift, IdleDriftConfig, load_idle_drift
 from chao.director.mood import Mood, MoodConfig, load_mood_config
 from chao.director.motion import MotionConfig, load_motion_config
 from chao.events import Event, Kind
+from chao.inputs.killswitch import KillSwitch, load_kill_switch_config
 from chao.outputs.audio import AudioPlayer, resolve_output_device
 from chao.outputs.speech import Speaker, TTSConfig, load_tts_config
 from chao.outputs.tts import PiperBackend
@@ -355,6 +356,7 @@ async def main() -> None:
     tts_config = load_tts_config(CHAO_CONFIG_PATH)
     motion_config = load_motion_config(CHAO_CONFIG_PATH)
     idle_drift_config = load_idle_drift_config(CHAO_CONFIG_PATH)
+    kill_switch_config = load_kill_switch_config(CHAO_CONFIG_PATH)
 
     cloud = AnthropicBackend()  # reads ANTHROPIC_API_KEY from the environment
     local = OllamaBackend(os.environ.get("CHAO_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL))
@@ -365,6 +367,14 @@ async def main() -> None:
     )
     speaker = _build_speaker(tts_config, motion_config, bus.publish)
     orchestrator.speaker = speaker
+
+    # Started before any input source (stdin, later Twitch) so the kill
+    # switch is live from the first possible moment, not an afterthought
+    # wired in after other tasks. start() must run inside the loop it's
+    # marshalling onto, so it's called here in main(), not from a
+    # separately-created task.
+    kill_switch = KillSwitch(bus=bus, config=kill_switch_config)
+    kill_switch.start()
 
     error_task = asyncio.create_task(_print_errors(bus.subscribe()))
     dashboard_task = asyncio.create_task(_run_dashboard_server(bus))
@@ -382,11 +392,14 @@ async def main() -> None:
         "chao is listening. Type a message and press enter. 'quit' or Ctrl+D to exit.\n"
         f"Dashboard: http://{DASHBOARD_HOST}:{DASHBOARD_PORT}/ "
         "(open it with `uv run python -m chao.dashboard.window`, "
-        "or `cd src/chao/dashboard/web && npm run dev` while iterating on the frontend)"
+        "or `cd src/chao/dashboard/web && npm run dev` while iterating on the frontend)\n"
+        f"Kill switch: {kill_switch_config.kill_hotkey} to silence immediately, "
+        f"{kill_switch_config.revive_hotkey} to resume."
     )
     try:
         await _read_stdin_into_bus(bus)
     finally:
+        kill_switch.stop()
         # kill() sets the in-flight turn's cancel token so _run_turn can
         # exit cleanly instead of being cancelled mid-await, which would
         # otherwise surface as a "Task was destroyed but it is pending"

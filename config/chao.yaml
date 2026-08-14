@@ -17,6 +17,13 @@ tts:
   # resolve_output_device) -- useful for local testing without OBS running.
   output_device: null
 
+kill_switch:                # §15 physical kill switch. See inputs/killswitch.py.
+                             # Built ahead of Twitch chat -- must exist before
+                             # adversarial input goes live. Global hotkeys (pynput),
+                             # so these fire even if the app isn't the focused window.
+  kill_hotkey: "<ctrl>+<alt>+k"
+  revive_hotkey: "<ctrl>+<alt>+r"
+
 motion:                    # §8.1 envelope-driven motion. See director/motion.py
                             # and docs/rigging_check_list.md item 4 for how these
                             # values were chosen -- not arbitrary defaults.

@@ -346,8 +346,8 @@ arbitration shapes, no decision made — nothing real exists yet to drive
 it with (no live chat/voice input), so there's nothing to test against
 this session. See design doc §10.3.
 
-Not yet committed at time of writing — same per-part-commit discipline as
-the rest of this session.
+Committed (`f788a67`), same per-part-commit discipline as the rest of this
+session.
 
 *(§8.1's implementation details — `director/motion.py`, `VTSMotionPlayer`,
 `Speaker`'s concurrent-motion path — are fully described in the "session
@@ -355,6 +355,100 @@ the rest of this session.
 tentative draft of this same writeup that used to live here. That draft
 predated this session's testing/advisor pass/live-verification/tuning and
 is removed rather than kept as stale duplicate detail.)*
+
+### Session 10, part 9: physical kill switch (§15)
+
+User picked Twitch chat as the next build. Before writing any chat code,
+orientation surfaced that the selection-policy arbiter and kill switch
+*mechanism* already exist fully built and tested in `bus.py` (`Bus.kill()`/
+`revive()`) — what's actually missing for "Twitch chat" is narrower than it
+sounded: the real IRC connection, priority scoring, and the kill switch's
+*physical trigger*. Consulted `advisor` before scoping the plan; its
+guidance reshaped two things and this part covers the first:
+
+- **`twitchio` dropped in favor of raw IRC over the existing `websockets`
+  dependency** — 2.x and 3.x use incompatible auth flows and there was no
+  way to know which `uv add twitchio` would pull; raw IRC needs no new
+  dependency and matches this project's established "read the raw protocol"
+  precedent (VTS). Not yet implemented — this part is kill switch only.
+- **Build the kill switch first, not alongside Twitch** — smaller,
+  self-contained, needs no Twitch dependency at all, and per design doc §15
+  it has to exist *before* adversarial chat input goes live, not after.
+
+**New file `src/chao/inputs/killswitch.py`**: `KillSwitch` binds two global
+hotkeys via `pynput.keyboard.GlobalHotKeys` (`kill_hotkey`/`revive_hotkey`,
+configurable, default `<ctrl>+<alt>+k`/`<ctrl>+<alt>+r`) to `bus.kill()`/
+`bus.revive()`. `bus.kill()` already did the real work — no `bus.py` changes
+needed — it sets the in-flight turn's cancel token, which is the *same*
+token already threaded through `AudioPlayer.play`'s 20ms poll loop and
+`Speaker.speak`'s own cancel check. Confirmed that chain by reading
+`brain/turn.py`/`outputs/speech.py`/`outputs/audio.py` before writing any
+code, per advisor's explicit push-back on an unverified assumption in the
+first draft plan.
+
+**Thread safety, per advisor**: pynput's listener fires callbacks on its own
+OS thread, not the asyncio loop — the same class of exception CLAUDE.md's
+no-threads rule already carves out for `sounddevice`'s audio callback.
+`KillSwitch.start()` captures `asyncio.get_running_loop()`; the hotkey
+callbacks marshal onto it via `call_soon_threadsafe`, catching `RuntimeError`
+for the shutdown-race case (hotkey pressed while `main()`'s teardown already
+closed the loop) — the press is just dropped, nothing left to kill.
+
+**New event kind, additive only**: `Kind.STATE_KILLED` (`{killed: bool}`),
+same shape as `STATE_FLY`. Checked before adding it that this doesn't touch
+the Event schema/bus contract the way CLAUDE.md's escalation trigger means —
+`bus.publish` fans out non-turn-triggering kinds immediately regardless of
+`_killed`, so `state.killed` reaches subscribers (dashboard, logs) even
+while the kill is in effect.
+
+**Config**: new `kill_switch:` block in `config/chao.yaml`, `KillSwitchConfig`/
+`load_kill_switch_config` following the same load/assemble split as every
+other config in this project.
+
+**Wired into `__main__.py`**: started in `main()` immediately after
+`orchestrator.speaker` is set, before any other task — live before any input
+source can trigger a turn. Stopped in the shutdown `finally`, ahead of the
+existing quit-time `bus.kill()` call.
+
+**Library choice verified live, not assumed**: advisor flagged this as the
+one thing that had to be checked empirically — `pynput` vs `keyboard` differ
+on whether Windows global hooks need admin. A standalone hotkey-only script
+was inconclusive (user couldn't tell if it fired); rather than debug that in
+isolation, went straight to the real end-to-end live check below, which
+settles the same question unambiguously since it uses the actual `pynput`
+listener.
+
+**12 new tests** (`tests/test_inputs_killswitch.py`): hotkey binding, kill
+blocking a subsequent *arbitrated* turn (via a real `bus.run()` task, not
+just publish-and-inspect — an earlier draft of this test was a false
+negative for exactly that reason, since nothing dequeues without `bus.run()`
+running, caught before committing), `STATE_KILLED` payload shape both
+directions, revive genuinely unblocking (asserts the handler actually ran,
+not just "no drop event"), `stop()`-before-`start()` safety, the closed-loop
+`RuntimeError` swallow, and `load_kill_switch_config`'s three cases (block
+present / file missing / block absent). Full suite: **233 passed**, ruff
+clean, format clean.
+
+**Live-verified end-to-end** — real `pynput` listener, real Piper synthesis,
+real audio playback (VTS not needed for this check, audio/bus wiring only):
+spoke a long sentence, killed it with `Ctrl+Alt+K` mid-sentence. **User:
+"It killed it immediately. split second response."** Confirmed via the
+script's own event log: `speech_start` at 5.99s, `STATE_KILLED killed=True`
+at 7.48s (roughly 1.5s into the sentence, well before it would have
+finished) — matching what was heard. A subsequent turn attempt was dropped
+(`dropped: killed`) while still killed. `Ctrl+Alt+R` published
+`STATE_KILLED killed=False`, and the very next turn actually ran and spoke
+to completion (`speech_end`, not dropped) — proving `revive()` genuinely
+restores normal operation, not just that `kill()` alone works.
+
+**No admin privileges required** — confirmed empirically by the live check
+succeeding from a normal terminal, settling the open question from
+advisor's review without needing a separate isolated script.
+
+`uv add pynput` (pulls `six` as a transitive dep).
+
+Kill switch complete before Twitch chat work begins, per advisor's explicit
+ordering call and design doc §15. Next: raw IRC chat client.
 
 Picked up with a custom Piper voice (`.onnx`, user-trained) ready for
 testing, plus a review of the not-yet-implemented
