@@ -149,6 +149,22 @@ class VTSEmoteSubscriber:
     practice every configured pool has `cooldown_s >= duration_s`, so this
     shouldn't happen with a single hotkey per pool, but it's cheap to get
     right regardless of config changes.
+
+    **Global mutual exclusion, one active expression at a time (session 10
+    part 13, user-reported live)**: `director.py`'s cooldown is tracked
+    per-pool, and `aliveness.py`'s reactions (anticipation, chat_spike)
+    don't share that state at all (by its own design) -- nothing previously
+    stopped two *different* pools from both being active in VTS
+    simultaneously, e.g. `curious` firing while `confused` is still
+    holding. Confirmed live: two emotes visibly clashed, and since each
+    pool's expression file bundles whatever it bundles (eyes included --
+    this build doesn't actually split eyes/ball into independently
+    addressable channels the way CLAUDE.md's expression model describes,
+    despite one hotkey file per pool), the eyes doubled up the same way.
+    Fixed by tracking the single currently-active expression file
+    (`_active_expression`) and deactivating it first whenever a *different*
+    file activates -- same-file re-activation (extending an already-active
+    emote's hold) is unaffected.
     """
 
     client: VTSTransport
@@ -158,6 +174,7 @@ class VTSEmoteSubscriber:
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 
     _deactivate_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
+    _active_expression: str | None = field(default=None, init=False)
 
     async def handle(self, event: Event) -> None:
         if event.kind != Kind.DIRECTOR_EMOTE:
@@ -168,6 +185,9 @@ class VTSEmoteSubscriber:
         await self._activate(expression_file, duration_s)
 
     async def _activate(self, expression_file: str, duration_s: float) -> None:
+        if self._active_expression is not None and self._active_expression != expression_file:
+            await self._deactivate_now(self._active_expression)
+
         pending = self._deactivate_tasks.pop(expression_file, None)
         if pending is not None:
             pending.cancel()
@@ -175,14 +195,25 @@ class VTSEmoteSubscriber:
         activated = await self._send(expression_file, active=True)
         if not activated:
             return
+        self._active_expression = expression_file
         self._deactivate_tasks[expression_file] = asyncio.create_task(
             self._deactivate_after(expression_file, duration_s)
         )
+
+    async def _deactivate_now(self, expression_file: str) -> None:
+        pending = self._deactivate_tasks.pop(expression_file, None)
+        if pending is not None:
+            pending.cancel()
+        await self._send(expression_file, active=False)
+        if self._active_expression == expression_file:
+            self._active_expression = None
 
     async def _deactivate_after(self, expression_file: str, duration_s: float) -> None:
         await self.sleep(duration_s)
         await self._send(expression_file, active=False)
         self._deactivate_tasks.pop(expression_file, None)
+        if self._active_expression == expression_file:
+            self._active_expression = None
 
     async def _send(self, expression_file: str, *, active: bool) -> bool:
         try:

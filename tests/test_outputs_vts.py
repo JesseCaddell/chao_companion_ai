@@ -124,6 +124,19 @@ def make_config(duration_s: float = 2.0, cooldown_s: float = 4.0) -> EmoteConfig
     )
 
 
+def make_two_pool_config(duration_s: float = 2.0) -> EmoteConfig:
+    return EmoteConfig(
+        pools={
+            "curious": EmotePool(
+                hotkeys=["question.exp3.json"], cooldown_s=3.0, duration_s=duration_s
+            ),
+            "confused": EmotePool(
+                hotkeys=["confused.exp3.json"], cooldown_s=8.0, duration_s=duration_s
+            ),
+        }
+    )
+
+
 def emote_event(pool: str = "happy", hotkey_id: str = "happy.exp3.json") -> Event:
     return Event(
         kind=Kind.DIRECTOR_EMOTE, payload={"pool": pool, "hotkey_id": hotkey_id, "reason": pool}
@@ -207,6 +220,87 @@ async def test_deactivation_failure_publishes_error_without_raising():
 
     error = next(e for e in events if e.kind == Kind.ERROR)
     assert error.payload["component"] == "vts"
+
+
+# --- Global mutual exclusion (session 10 part 13: user-reported live overlap) ---
+
+
+async def test_second_pool_deactivates_the_first_before_activating():
+    client = FakeVTSClient()
+    sub = VTSEmoteSubscriber(client=client, emote_config=make_two_pool_config(), sleep=GatedSleep())
+
+    await sub.handle(emote_event(pool="curious", hotkey_id="question.exp3.json"))
+    await sub.handle(emote_event(pool="confused", hotkey_id="confused.exp3.json"))
+
+    assert client.calls == [
+        (
+            "ExpressionActivationRequest",
+            {"expressionFile": "question.exp3.json", "active": True, "fadeTime": 0.25},
+        ),
+        (
+            "ExpressionActivationRequest",
+            {"expressionFile": "question.exp3.json", "active": False, "fadeTime": 0.25},
+        ),
+        (
+            "ExpressionActivationRequest",
+            {"expressionFile": "confused.exp3.json", "active": True, "fadeTime": 0.25},
+        ),
+    ]
+
+
+async def test_only_one_expression_active_after_two_different_pools_fire():
+    client = FakeVTSClient()
+    sub = VTSEmoteSubscriber(client=client, emote_config=make_two_pool_config(), sleep=GatedSleep())
+
+    await sub.handle(emote_event(pool="curious", hotkey_id="question.exp3.json"))
+    await sub.handle(emote_event(pool="confused", hotkey_id="confused.exp3.json"))
+
+    assert sub._active_expression == "confused.exp3.json"
+
+
+async def test_same_file_reactivating_does_not_deactivate_itself():
+    client = FakeVTSClient()
+    sub = VTSEmoteSubscriber(client=client, emote_config=make_config(), sleep=GatedSleep())
+
+    await sub.handle(emote_event())
+    await sub.handle(emote_event())  # same pool/file again -- extends the hold
+
+    assert client.calls == [
+        (
+            "ExpressionActivationRequest",
+            {"expressionFile": "happy.exp3.json", "active": True, "fadeTime": 0.25},
+        ),
+        (
+            "ExpressionActivationRequest",
+            {"expressionFile": "happy.exp3.json", "active": True, "fadeTime": 0.25},
+        ),
+    ]
+
+
+async def test_supplanted_expressions_scheduled_deactivate_does_not_double_fire():
+    client = FakeVTSClient()
+    sleep = GatedSleep()
+    sub = VTSEmoteSubscriber(client=client, emote_config=make_two_pool_config(), sleep=sleep)
+
+    await sub.handle(emote_event(pool="curious", hotkey_id="question.exp3.json"))
+    await sub.handle(emote_event(pool="confused", hotkey_id="confused.exp3.json"))
+    # The first pool's own scheduled auto-deactivate must have been
+    # cancelled by the supplant, not left pending to fire later and
+    # clobber _active_expression/emit a redundant deactivate call.
+    count_before = len(client.calls)
+    await asyncio.sleep(0)
+    assert len(client.calls) == count_before
+
+
+async def test_active_expression_clears_after_natural_deactivation():
+    client = FakeVTSClient()
+    sleep = RecordingSleep()
+    sub = VTSEmoteSubscriber(client=client, emote_config=make_config(duration_s=1.0), sleep=sleep)
+
+    await sub.handle(emote_event())
+    await asyncio.sleep(0)  # background deactivate task runs to completion
+
+    assert sub._active_expression is None
 
 
 async def test_second_activation_before_deactivate_extends_hold_not_double_deactivate():

@@ -18,9 +18,9 @@ tts:
   output_device: null
 
 voice:                        # §4.1/§5 voice input. See inputs/voice.py.
-  enabled: false               # off by default -- continuous mic capture is a
-                                # real privacy-relevant behavior change, opt in
-                                # explicitly once VAD/echo behavior is tuned.
+  enabled: true                 # session 10 part 12: VAD context bug fixed and
+                                 # live-verified against the real mic -- opted in
+                                 # for a full in-app live test.
   input_device: null           # case-insensitive substring match against the
                                 # mic device list, like tts.output_device. null
                                 # uses the system default input device.

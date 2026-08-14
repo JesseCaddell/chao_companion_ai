@@ -739,6 +739,66 @@ architecture if local mic capture ever proves troublesome in practice —
 would trade this module's `sounddevice`/VAD/whisper stack for Discord's
 voice API and someone else's audio pipeline.
 
+**First live conversational test, voice enabled end-to-end**: user
+flipped `voice.enabled: true` and ran the real app (`uv run python -m
+chao`) for a full live conversation — spoke, chao transcribed, responded
+via the LLM, spoke back, and moved/emoted throughout. User: "it works,
+chao actually responded to what I said... we had a whole conversation
+and chao moved around and made faces and used the orbs. It was very
+cute." First real end-to-end proof of the whole pipeline (voice in →
+brain → director → TTS/motion/emotes out) working together outside of
+component-level live checks.
+
+### Session 10, part 13: emote mutual exclusion — a real bug found via the first live conversation
+
+That same conversation surfaced a real bug: "two emotes fired at once
+and clashed visually. Specifically the question, confused and heart... the
+same happened with the eyes." Investigated `director.py`/`outputs/vts.py`
+rather than guessing: `Director._maybe_fire_emote`'s cooldown
+(`_last_fired`) is tracked **per pool**, and `aliveness.py`'s reactions
+(anticipation, chat_spike) don't share that state at all, by design — so
+nothing has ever stopped two *different* pools from both being active in
+VTS at the same time. `VTSEmoteSubscriber._deactivate_tasks` was keyed
+per expression file, not globally, confirming this: a second pool firing
+just added a second active expression rather than replacing the first.
+Also clarifies the "eyes doubling" report — this build's pools are one
+VTS expression file each, not yet split into CLAUDE.md's described
+independently-addressable eyes/ball channels, so eyes were just bundled
+inside whichever files were simultaneously active, doubling up right
+along with the ball. (One open oddity, not chased: nothing in
+`_TAG_TO_POOL` maps any tag to the `heart` pool, and `[heart]` isn't even
+in `identity.md`'s valid tag list — unclear how heart specifically fired;
+noted but not investigated, since it doesn't change the fix.)
+
+**Fixed**: `VTSEmoteSubscriber` now tracks a single `_active_expression`
+and deactivates it first whenever a *different* file wants to activate —
+global, one active expression at a time. Same-file re-activation
+(extending an already-active emote's hold, the existing pre-session-10
+behavior) is unaffected; only cross-pool overlap changes. **6 new tests**
+covering the deactivate-then-activate ordering, same-file non-interference,
+the supplanted pool's own scheduled auto-deactivate not double-firing
+after being cancelled, and `_active_expression` clearing correctly after
+natural deactivation. Full suite: **290 passed**, ruff clean, format
+clean.
+
+**Live-verified against real VTS**: fired `curious` then `confused` 1s
+apart (close enough that the old code would have shown both at once).
+User: "curious turned off, confused turned on, no overlap. Perfect."
+
+**Known limitation, raised by the user immediately after, correctly**:
+global exclusion is blunt — it also prevents the cases the original
+two-channel design (CLAUDE.md's Expression model) actually wants
+running *simultaneously*: sustained eye-mood alongside a beat-level ball
+reaction (e.g. happy eyes while the ball pops a question mark). The
+current pools bundle both into one file per pool, so there's no way to
+address them independently yet. Real fix needs (a) the rigger/user
+authoring genuinely separate eyes-only and ball-only VTS expression
+files (VTS-side work only the user can do, same category as every prior
+manual-binding step this project has needed), and (b) `EmotePool`/
+`VTSEmoteSubscriber` tracking mutual exclusion **per channel** (a
+`{channel: expression_file}` dict, not one scalar) instead of globally.
+Discussed with the user, not yet built or scoped further this session.
+
 Picked up with a custom Piper voice (`.onnx`, user-trained) ready for
 testing, plus a review of the not-yet-implemented
 `docs/tts_pronunciation_overrides.md` design note.

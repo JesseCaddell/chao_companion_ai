@@ -61,7 +61,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import ClassVar, Protocol
 
 import numpy as np
 import yaml
@@ -145,7 +145,7 @@ class SileroVAD:
     just silently produces numerically wrong output instead of an error.
     """
 
-    _CONTEXT_SAMPLES = {16000: 64, 8000: 32}
+    _CONTEXT_SAMPLES: ClassVar[dict[int, int]] = {16000: 64, 8000: 32}
 
     def __init__(self, model_path: Path, *, sample_rate: int = 16000) -> None:
         import onnxruntime as ort
