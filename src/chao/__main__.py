@@ -98,7 +98,7 @@ def _build_speaker(
     if not voice_path.exists():
         print(f"  (voice model not found at {voice_path}, chao won't speak)")
         return None
-    backend = PiperBackend(voice_path)
+    backend = PiperBackend(voice_path, length_scale=tts_config.length_scale)
     device = resolve_output_device(tts_config.output_device)
     player = AudioPlayer(device=device)
     return Speaker(backend=backend, player=player, publish=publish, motion_config=motion_config)

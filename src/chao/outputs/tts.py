@@ -70,13 +70,20 @@ class _PiperChunk(Protocol):
 
 
 class _Voice(Protocol):
-    def synthesize(self, text: str) -> Iterable[_PiperChunk]: ...
+    def synthesize(self, text: str, syn_config: object = None) -> Iterable[_PiperChunk]: ...
 
 
 class PiperBackend:
-    def __init__(self, model_path: Path, *, voice: _Voice | None = None) -> None:
+    def __init__(
+        self, model_path: Path, *, voice: _Voice | None = None, length_scale: float | None = None
+    ) -> None:
         self._model_path = model_path
         self._voice = voice
+        # None -- not 1.0 -- so this falls through to the voice's own
+        # trained default rather than silently overriding it. See
+        # config/chao.yaml's tts.length_scale comment for why this
+        # exists (session 10 part 13: trailing-consonant clipping).
+        self._length_scale = length_scale
 
     def _load_voice(self) -> _Voice:
         if self._voice is None:
@@ -94,4 +101,7 @@ class PiperBackend:
             yield AudioChunk(samples=chunk.audio_float_array, sample_rate=chunk.sample_rate)
 
     def _synthesize_sync(self, text: str) -> list[_PiperChunk]:
-        return list(self._load_voice().synthesize(text))
+        from piper.config import SynthesisConfig
+
+        syn_config = SynthesisConfig(length_scale=self._length_scale)
+        return list(self._load_voice().synthesize(text, syn_config=syn_config))

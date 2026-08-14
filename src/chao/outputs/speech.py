@@ -34,6 +34,20 @@ from chao.outputs.vts import VTSMotionPlayer
 class TTSConfig:
     voice_path: str = ""
     output_device: str | None = None
+    # None -- not 1.0 -- so an unset config falls through to the voice's
+    # own trained default (Piper: `if length_scale is None: length_scale
+    # = self.config.length_scale`), not silently overriding it with a
+    # value that happens to match most voices' defaults but might not
+    # match this one's. Session 10 part 13: user reported the custom
+    # voice clipping trailing consonants at sentence end ("end" -> "en-").
+    # Confirmed not a playback bug (AudioPlayer ran the full measured
+    # duration) and not a trimming bug (Piper's synthesize() has no
+    # silence-trimming code at all) -- the raw generated audio itself is
+    # short on the final consonant, a training-data characteristic.
+    # length_scale > 1 slows phoneme duration, giving trailing consonants
+    # more time/energy to render -- worth tuning by ear before concluding
+    # the fix has to happen in the training pipeline instead.
+    length_scale: float | None = None
 
 
 def load_tts_config(path: Path) -> TTSConfig:
@@ -45,9 +59,11 @@ def load_tts_config(path: Path) -> TTSConfig:
     """
     data = yaml.safe_load(path.read_text()) or {} if path.exists() else {}
     raw = data.get("tts") or {}
+    length_scale = raw.get("length_scale")
     return TTSConfig(
         voice_path=str(raw.get("voice_path", "")),
         output_device=raw.get("output_device"),
+        length_scale=float(length_scale) if length_scale is not None else None,
     )
 
 

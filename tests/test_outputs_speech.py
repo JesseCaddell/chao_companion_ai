@@ -21,7 +21,7 @@ class FakeVoice:
         self.chunks = chunks
         self.calls: list[str] = []
 
-    def synthesize(self, text: str):
+    def synthesize(self, text: str, syn_config=None):
         self.calls.append(text)
         return self.chunks
 
@@ -137,12 +137,14 @@ def test_load_tts_config_reads_the_tts_block(tmp_path):
     config_path = tmp_path / "chao.yaml"
     config_path.write_text(
         "tts:\n  voice_path: data/voices/custom.onnx\n  output_device: CABLE Input\n"
+        "  length_scale: 1.15\n"
     )
 
     config = load_tts_config(config_path)
 
     assert config.voice_path == "data/voices/custom.onnx"
     assert config.output_device == "CABLE Input"
+    assert config.length_scale == 1.15
 
 
 def test_load_tts_config_defaults_when_file_missing(tmp_path):
@@ -150,6 +152,16 @@ def test_load_tts_config_defaults_when_file_missing(tmp_path):
 
     assert config.voice_path == ""
     assert config.output_device is None
+    assert config.length_scale is None
+
+
+def test_load_tts_config_defaults_length_scale_to_none_when_absent(tmp_path):
+    config_path = tmp_path / "chao.yaml"
+    config_path.write_text("tts:\n  voice_path: data/voices/custom.onnx\n")
+
+    config = load_tts_config(config_path)
+
+    assert config.length_scale is None
 
 
 class FakeMotionPlayer:

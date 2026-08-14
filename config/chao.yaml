@@ -17,6 +17,18 @@ tts:
   # resolve_output_device) -- useful for local testing without OBS running.
   output_device: null
 
+  length_scale: 1.15
+  # Session 10 part 13: user reported the custom voice clipping trailing
+  # consonants at sentence end ("end" -> "en-"). Confirmed not a playback
+  # bug (AudioPlayer measured the full audio duration playing, not cut
+  # short) and not a trimming bug (Piper's synthesize() has no silence-
+  # trimming code at all) -- the model's own generated audio is short on
+  # the final consonant, a training-data characteristic. length_scale > 1
+  # slows phoneme duration (1.0 is the voice's own trained default, unset
+  # here would mean "use whatever that is"), giving trailing consonants
+  # more time/energy to render. 1.15 is an untested starting guess, not a
+  # measured value -- tune by ear.
+
 voice:                        # §4.1/§5 voice input. See inputs/voice.py.
   enabled: true                 # session 10 part 12: VAD context bug fixed and
                                  # live-verified against the real mic -- opted in

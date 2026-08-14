@@ -15,9 +15,11 @@ class FakeVoice:
     def __init__(self, chunks: list[FakePiperChunk]) -> None:
         self.chunks = chunks
         self.calls: list[str] = []
+        self.syn_configs: list = []
 
-    def synthesize(self, text: str):
+    def synthesize(self, text: str, syn_config=None):
         self.calls.append(text)
+        self.syn_configs.append(syn_config)
         return self.chunks
 
 
@@ -33,6 +35,24 @@ async def test_synthesize_yields_chunks_from_the_voice():
     assert np.array_equal(result[0].samples, samples)
     assert result[0].sample_rate == 22050
     assert voice.calls == ["hello"]
+
+
+async def test_synthesize_passes_length_scale_through_to_syn_config():
+    voice = FakeVoice([FakePiperChunk(np.zeros(1, dtype=np.float32), 22050)])
+    backend = PiperBackend(Path("unused.onnx"), voice=voice, length_scale=1.15)
+
+    await anext(backend.synthesize("hello"))
+
+    assert voice.syn_configs[0].length_scale == 1.15
+
+
+async def test_synthesize_defaults_length_scale_to_none():
+    voice = FakeVoice([FakePiperChunk(np.zeros(1, dtype=np.float32), 22050)])
+    backend = PiperBackend(Path("unused.onnx"), voice=voice)
+
+    await anext(backend.synthesize("hello"))
+
+    assert voice.syn_configs[0].length_scale is None
 
 
 async def test_synthesize_yields_one_chunk_per_sentence():
