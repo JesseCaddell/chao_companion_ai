@@ -366,6 +366,92 @@ def test_target_x_stays_within_configured_bounds():
     assert -0.3 <= fly.target_x <= 0.3
 
 
+# --- Fly.handle(): directed fly tags (session 10 part 16) ---
+
+
+def test_directed_fly_tag_launches_from_grounded():
+    fly, events = make_fly()
+
+    fly.handle(tag_event("fly:left"))
+
+    assert fly.flying is True
+    assert events[-1].payload["trigger"] == "directed"
+    assert events[-1].payload["target_x"] == fly.config.x_min
+
+
+def test_directed_fly_tag_right_targets_x_max():
+    fly, events = make_fly()
+
+    fly.handle(tag_event("fly:right"))
+
+    assert events[-1].payload["target_x"] == fly.config.x_max
+
+
+def test_directed_fly_tag_center_targets_midpoint():
+    fly, events = make_fly(config=make_fly_config(x_min=-0.6, x_max=0.6))
+
+    fly.handle(tag_event("fly:center"))
+
+    assert events[-1].payload["target_x"] == 0.0
+
+
+def test_directed_fly_tag_retargets_immediately_bypassing_reposition_floor():
+    clock = FakeClock()
+    fly, events = make_fly(clock=clock, config=make_fly_config(min_reposition_s=8.0))
+    fly.handle(mood_event(0.9))  # launches, random target
+    clock.advance(0.1)  # nowhere near the 8s floor
+
+    fly.handle(tag_event("fly:right"))
+
+    assert fly.target_x == fly.config.x_max
+    assert events[-1].payload["trigger"] == "directed"
+
+
+def test_directed_target_latches_against_ambient_reposition():
+    """A chao told to go left must stay left -- an ambient, mood-tick-driven
+    reposition check past the floor must not randomly re-scatter a directed
+    target. See aliveness.py's Fly docstring, session 10 part 16.
+    """
+    clock = FakeClock()
+    fly, events = make_fly(clock=clock, config=make_fly_config(min_reposition_s=8.0))
+    fly.handle(tag_event("fly:left"))  # directed launch
+    clock.advance(8.0)  # past the reposition floor
+
+    fly.handle(mood_event(0.8, source="tag"))  # ambient activity, still flying
+
+    assert fly.target_x == fly.config.x_min
+    assert events[-1].payload["trigger"] != "reposition"
+
+
+def test_directed_latch_clears_on_landing():
+    """After landing, the next autonomous launch must be free to roam again
+    -- a directed target shouldn't pin the chao's position forever.
+    """
+    clock = FakeClock()
+    fly, events = make_fly(
+        clock=clock, config=make_fly_config(min_dwell_s=5.0, min_reposition_s=8.0)
+    )
+    fly.handle(tag_event("fly:left"))  # directed launch
+    clock.advance(5.0)
+    fly.handle(mood_event(0.1))  # lands (arousal_low, past min_dwell_s)
+    assert fly.flying is False
+
+    fly.handle(mood_event(0.9))  # relaunches (arousal_high)
+    clock.advance(8.0)
+    fly.handle(mood_event(0.8, source="tag"))  # ambient activity past the floor
+
+    assert events[-1].payload["trigger"] == "reposition"
+
+
+def test_unknown_fly_direction_is_ignored():
+    fly, events = make_fly()
+
+    fly.handle(tag_event("fly:up"))
+
+    assert fly.flying is False
+    assert events == []
+
+
 # --- Fly.handle(): tick-sourced director.mood events (session 9) ---
 
 

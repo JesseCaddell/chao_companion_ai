@@ -1,4 +1,4 @@
-from chao.director.tags import ParsedTag, parse_tags, split_sentences
+from chao.director.tags import ParsedTag, parse_tags, split_sentences, strip_actions
 
 
 def test_simple_tag_is_parsed_and_stripped():
@@ -71,6 +71,20 @@ def test_look_tag_with_unknown_target_is_dropped():
     cleaned, tags = parse_tags("[look:streamer] Hi")
 
     assert cleaned == "Hi"
+    assert tags == []
+
+
+def test_fly_tag_with_known_direction():
+    cleaned, tags = parse_tags("[fly:left] Watch this!")
+
+    assert cleaned == "Watch this!"
+    assert tags == [ParsedTag(name="fly", value="left", sentence_index=0)]
+
+
+def test_fly_tag_with_unknown_direction_is_dropped():
+    cleaned, tags = parse_tags("[fly:up] Whee")
+
+    assert cleaned == "Whee"
     assert tags == []
 
 
@@ -148,3 +162,32 @@ def test_split_sentences_basic():
 
 def test_split_sentences_empty_string():
     assert split_sentences("") == []
+
+
+def test_strip_actions_removes_asterisk_wrapped_narration():
+    assert strip_actions("*flutters over here* Hi there!") == "Hi there!"
+
+
+def test_strip_actions_removes_narration_mid_sentence():
+    assert strip_actions("Hi there *bounces excitedly* how are you?") == "Hi there how are you?"
+
+
+def test_strip_actions_all_narration_collapses_to_empty():
+    assert strip_actions("*just flies around in a circle*") == ""
+
+
+def test_strip_actions_multiple_actions_in_one_sentence():
+    assert strip_actions("*waves* Hi *sits down* bye") == "Hi bye"
+
+
+def test_strip_actions_leaves_lone_asterisk_as_literal_text():
+    text = "5 * 3 is fifteen"
+    assert strip_actions(text) == text
+
+
+def test_strip_actions_no_asterisks_unchanged_aside_from_whitespace():
+    assert strip_actions("Just a normal sentence.") == "Just a normal sentence."
+
+
+def test_strip_actions_collapses_whitespace_left_behind():
+    assert strip_actions("Hi   *pauses*   there") == "Hi there"

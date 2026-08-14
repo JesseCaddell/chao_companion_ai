@@ -71,6 +71,9 @@ from chao.events import Event, Kind
 
 _DEFAULT_POOL = "curious"
 
+_FLY_TARGET_FRACTIONS = {"left": 0.0, "right": 1.0, "center": 0.5}
+_FLY_DIRECTIONS = frozenset(f"fly:{d}" for d in _FLY_TARGET_FRACTIONS)
+
 
 @dataclass
 class Aliveness:
@@ -198,11 +201,23 @@ class Fly:
       "noise, not sine waves" warns against. Tag-sourced events are real
       activity (a tag the LLM actually emitted), so those are what
       "motivated repositioning" means here.
-    - `director.tag` is only checked for an unconditional "sad" tag, which
-      lands immediately — bypassing both the arousal threshold and
+    - `director.tag` is checked for an unconditional "sad" tag, which lands
+      immediately — bypassing both the arousal threshold and
       `min_dwell_s`. A chao that just turned sad shouldn't stay aloft for
       up to `min_dwell_s` more seconds because the tag landed right after
       a launch.
+    - `director.tag` is also checked for `fly:left` / `fly:right` /
+      `fly:center` (session 10 part 16) — a directed tag from the LLM,
+      used when the streamer explicitly asks chao to move somewhere.
+      Bypasses the arousal threshold and dwell/reposition floors the same
+      way `sad` bypasses them for landing: those floors exist to damp
+      *autonomous* pacing, not to veto an explicit directive. Launches
+      from grounded if needed. The resulting target **latches** —
+      `_maybe_reposition`'s ambient, mood-tick-driven repositioning is
+      skipped entirely while `_directed` is set, so a chao told to go left
+      doesn't randomly wander off again a few seconds later. The latch
+      clears on landing (any route), so the next autonomous launch goes
+      back to picking a random spot.
 
     Landing during a quiet stretch works as of session 9's `Mood.tick` +
     `__main__.py`'s `_run_mood` timeout loop — arousal now actually
@@ -224,6 +239,7 @@ class Fly:
     target_x: float = field(default=0.0, init=False)
     _last_transition: float = field(init=False)
     _last_reposition: float = field(init=False)
+    _directed: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         now = self.clock()
@@ -251,11 +267,27 @@ class Fly:
             self._maybe_reposition(now, event.turn_id)
 
     def _on_tag(self, event: Event) -> None:
-        if not self.flying or event.payload.get("tag") != "sad":
-            return
-        self._transition(False, "sad", self.clock(), event.turn_id)
+        tag = event.payload.get("tag")
+        if tag == "sad":
+            if self.flying:
+                self._transition(False, "sad", self.clock(), event.turn_id)
+        elif tag in _FLY_DIRECTIONS:
+            self._on_directed_fly(tag, event.turn_id)
+
+    def _on_directed_fly(self, tag: str, turn_id: str | None) -> None:
+        direction = tag.split(":", 1)[1]
+        fraction = _FLY_TARGET_FRACTIONS[direction]
+        now = self.clock()
+        self.flying = True
+        self.target_x = self.config.x_min + fraction * (self.config.x_max - self.config.x_min)
+        self._directed = True
+        self._last_transition = now
+        self._last_reposition = now
+        self._publish(turn_id, "directed")
 
     def _maybe_reposition(self, now: float, turn_id: str | None) -> None:
+        if self._directed:
+            return
         if now - self._last_reposition < self.config.min_reposition_s:
             return
         self._last_reposition = now
@@ -268,6 +300,8 @@ class Fly:
         self._last_reposition = now
         if flying:
             self.target_x = self.rng.uniform(self.config.x_min, self.config.x_max)
+        else:
+            self._directed = False
         self._publish(turn_id, trigger)
 
     def _publish(self, turn_id: str | None, trigger: str) -> None:

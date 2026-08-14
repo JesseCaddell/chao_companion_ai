@@ -32,10 +32,18 @@ KNOWN_TAGS = frozenset(
     {"happy", "affection", "curious", "surprise", "confused", "sad", "angry", "thinking", "pause"}
 )
 KNOWN_LOOK_TARGETS = frozenset({"chat", "you"})
+KNOWN_FLY_TARGETS = frozenset({"left", "right", "center"})
 
 # Broad on purpose: matches any single bracketed word (or word:word) so
 # unrecognized-but-tag-shaped tokens still get stripped from spoken text.
 _TAG_PATTERN = re.compile(r"\[([a-zA-Z0-9_-]+)(?::([a-zA-Z0-9_-]+))?\]")
+
+# Roleplay-style action narration, e.g. "*flutters over here*". Only matches
+# a balanced pair -- `[^*]*` can't itself contain a `*`, so a single stray
+# asterisk in prose (a footnote marker, a typo'd emphasis) is left as
+# literal text rather than swallowing the rest of the sentence. Same
+# tolerant-parser spirit as _TAG_PATTERN above.
+_ACTION_PATTERN = re.compile(r"\*[^*]*\*")
 
 SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
 
@@ -92,6 +100,19 @@ def parse_tags(text: str) -> tuple[str, list[ParsedTag]]:
     return cleaned_text, tags
 
 
+def strip_actions(text: str) -> str:
+    """Remove `*asterisk-wrapped action narration*` from already tag-cleaned
+    text. A companion, not a narrator (see identity.md) -- this is the
+    deterministic backstop for that instruction, since prompt wording alone
+    doesn't reliably hold against a strong roleplay-narration attractor.
+    Applied after `parse_tags` since it operates on cleaned text, not raw
+    model output; a sentence that's entirely an action collapses to "",
+    which callers (TTS, the subtitle overlay) already treat as nothing to
+    say.
+    """
+    return re.sub(r"\s+", " ", _ACTION_PATTERN.sub("", text)).strip()
+
+
 def split_sentences(text: str) -> list[str]:
     """Split already-cleaned text on sentence boundaries. Shared with
     director.py so both use the same notion of "sentence" as `parse_tags`'
@@ -103,6 +124,8 @@ def split_sentences(text: str) -> list[str]:
 def _is_known(name: str, value: str | None) -> bool:
     if name == "look":
         return value in KNOWN_LOOK_TARGETS
+    if name == "fly":
+        return value in KNOWN_FLY_TARGETS
     return value is None and name in KNOWN_TAGS
 
 

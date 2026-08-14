@@ -1016,6 +1016,192 @@ commit-hygiene note (batch *related* changes, not unrelated ones together).
 `pyproject.toml`/`uv.lock`'s `sounddevice` addition belongs with the wiring
 commit, not the pronunciation one.
 
+### Session 10, part 15: action-narration strip + identity.md wording pass
+
+Since part 14 landed: confirmed the real `_run_twitch` pipeline receives
+messages on the user's own channel (not just a quiet/public test channel —
+the one gap prior Twitch checks hadn't covered), shared the §4.1 priority
+tiers, and pointed the user at the subtitle overlay's existing HTTP
+endpoint for OBS (now running live in their scene). No code changes for
+any of that — verification and pointers only.
+
+User then asked two connected questions after watching a real
+conversation: (1) chao's speech includes `*flutters over here*`-style
+action narration — can it be removed? (2) does chao know it has access to
+its emotes and movement, and can it manage them on its own?
+
+Both touch `config/identity.md`, which the file itself flags as deferred
+pending an Opus-reviewed pass per CLAUDE.md's escalation rule — consulted
+`advisor` before editing rather than patching it ad hoc. Guidance: make two
+targeted edits, don't turn this into the full deferred character-sheet
+pass; answer the movement question honestly but don't build anything for
+it, since no VTS look-direction parameter is bound yet (same phase-0
+manual-bind blocker noted since session 8) — wiring the prompt to a
+capability nothing can act on is exactly the "no real consumer" build this
+project has cut before. `[look:chat]`/`[look:you]` are still in the tag
+vocabulary and still produce only `director.tag` telemetry; nothing
+consumes them. Idle drift, `Fly`, and envelope motion all still run
+completely autonomously with zero LLM input — this is design doc §10.3's
+arbitration question, still open, still just logged, not decided.
+
+**Two layers, per advisor** (prompt wording alone doesn't reliably hold
+against roleplay-narration as an attractor for a casual companion
+persona):
+
+1. `config/identity.md`: temperament paragraph now explicitly names and
+   bans asterisk actions (`*flutters over here*`) and self-narration
+   ("I nod enthusiastically"). Tag protocol section reframed to describe
+   tags as *what chao already is* (face/ball react on their own when it
+   feels things) rather than *a mechanism it operates* — wording it as a
+   controllable tool risks the model narrating its own tag use, the same
+   failure class as the asterisks. Placeholder header and structure left
+   untouched; this is not the deferred full pass.
+2. **The deterministic backstop, and the one that actually guarantees
+   it**: `tags.py` gains `strip_actions()`, a `\*[^*]*\*` sweep applied in
+   `director.py`'s `_handle_sentence` right after `parse_tags`. Balanced-
+   pair only, same tolerant-parser spirit as `_TAG_PATTERN` — a lone
+   stray `*` (a typo, an equation) is left as literal text rather than
+   swallowing the rest of the sentence. This matters beyond TTS: the
+   cleaned sentence is what `Speaker` publishes and what the OBS subtitle
+   overlay renders, so an unstripped action would have shown up on stream
+   text too, not just been spoken. A sentence that's entirely narration
+   collapses to `""` — already a no-op for `Speaker.speak` and already
+   filtered out of turn history by `turn.py`'s existing empty-reply guard,
+   so no new handling needed there.
+
+8 new tests (`tags.py`'s `strip_actions` directly, one through the real
+`Director.process_chunk` path since that's what actually reaches TTS/
+overlay). Full suite 306 passed, ruff clean. Not yet live-verified against
+the real OBS overlay — per advisor, the right check is a live conversation
+with the overlay open, watching for whether any asterisk text leaks
+through, not a unit test. Not yet committed.
+
+### Session 10, part 16: directed fly — `[fly:left/right/center]`
+
+User asked, after watching a live conversation: can chao move around the
+canvas on command instead of only flying autonomously left/right — e.g.
+"fly to the left of the screen" should actually send it there.
+
+Unlike last turn's look-direction question, this one is **not** blocked
+by the phase-0 VTS hand-binding issue: `Fly`/`VTSFlySubscriber` already
+drive horizontal position via `MoveModelRequest`, a direct API call, not
+a bound custom parameter (session 9 finding). Consulted `advisor` anyway
+before building, since it touches `identity.md` (prompt design,
+escalation-worthy per CLAUDE.md) and `Fly`'s tag-handling behavior.
+Confirmed unblocked, plan endorsed, two real gaps flagged and closed:
+
+1. **Latching.** A directed target has to survive the next ambient,
+   tick-sourced reposition check, or a chao told to go left would
+   randomly re-scatter within `min_reposition_s` seconds — reading as the
+   feature not working. `Fly` gains a `_directed` flag: set on a directed
+   tag, checked (and skipped entirely) by `_maybe_reposition`, cleared on
+   any landing so the next autonomous launch roams freely again.
+2. **Launch-from-grounded.** The old `_on_tag` only had a body for
+   `flying and tag == "sad"`; a directed tag has to work whether or not
+   chao is currently flying, so `_on_tag` was restructured rather than
+   just gaining a second condition on the same guard.
+
+**Built:** `tags.py` gains `KNOWN_FLY_TARGETS = {"left", "right",
+"center"}`, `_is_known` extended (same `look`-tag pattern). `aliveness.py`'s
+`Fly` gains `_on_directed_fly`: maps direction to a fraction of
+`[x_min, x_max]` (0.0/1.0/0.5, robust to an asymmetric range even though
+today's is symmetric), forces `flying = True`, sets the target directly
+(no `rng.uniform`), bypasses `min_dwell_s`/`min_reposition_s` the same way
+`sad` bypasses them for landing — those floors damp autonomous pacing, not
+explicit directives. No new `Kind`, no bus schema change: `_handle_sentence`
+already publishes `director.tag` for every known tag before
+`_maybe_fire_emote` filters, so `Fly._on_tag` receives `fly:left` etc. for
+free, the cheapest correct wiring available.
+
+**`identity.md`**: added `[fly:left]`/`[fly:right]`/`[fly:center]` to the
+tag list, worded reactively ("if someone asks you to move to a side of the
+screen") rather than as a standing available action — per advisor, framing
+it as a tool chao operates risks the model volunteering it unprompted or
+narrating its own use, the same failure class part 15 just addressed for
+emotes. `[fly:land]` deliberately not built — existing arousal-based
+landing plus `[sad]` covers it and it wasn't asked for.
+
+9 new tests (`tags.py` parsing, `aliveness.py`'s directed-launch/retarget/
+latch/latch-clear/unknown-direction behavior). Full suite 315 passed, ruff
+clean. **Not yet live-verified** — per advisor, the real check is asking
+chao to fly left in a live turn and watching it actually go left in VTS
+(and stay there through further conversation), plus confirming the
+left/right sign convention against the real model since nothing in the
+transcript pins which direction negative `positionX` is. Not yet
+committed.
+
+### Next task (logged, not started): LLM-directed movement and emotion instead of predetermined tracks
+
+User feedback after living with part 16's directed-fly feature and the
+rest of the aliveness layer for a while, live:
+
+1. **Fly fires on almost every response** — doesn't read as an
+   occasional, arousal-triggered event the way §6.4 intends; feels
+   constant rather than random. Likely (not yet confirmed) a tuning
+   problem: `on_above=0.70` combined with however much a `[happy]`/
+   `[surprise]`/etc. tag nudges arousal per turn in `mood.py` may just be
+   crossing the threshold too easily. Worth instrumenting/logging actual
+   arousal values across a real session before touching thresholds blind.
+2. **Idle drift still doesn't exist.** The user wants chao to slowly
+   glide between locations during quiet periods every so often — this is
+   design doc §10.2 (noise, not sine waves) and the micro tier of §10.1,
+   both still explicitly unbuilt (see aliveness.py's module docstring:
+   "still not built, deliberately... needs continuous parameter
+   injection" — though note idle *horizontal position* specifically does
+   NOT have that blocker, same as directed fly; it's positional
+   `MoveModelRequest` calls, not a bound custom parameter, so this may be
+   more buildable right now than the docstring's blanket "still blocked"
+   framing suggests. Re-check that framing before assuming it's blocked.)
+3. **The bigger ask, and the real scope of this task:** the user wants to
+   move away from "predetermined tracks" — the current hysteresis state
+   machine (Fly), fixed tag-to-pool cooldown tables (Director), and
+   arousal-driven autonomy (Aliveness) — toward the LLM having **full
+   control over chao's movement and emotion**, not just picking from a
+   small fixed vocabulary that a deterministic state machine then
+   arbitrates against on its own schedule.
+
+**This directly tensions with CLAUDE.md invariant 3** ("The LLM never
+emits parameter values. It emits sparse semantic tags... The director
+owns all physical interpretation. If you find yourself prompting the
+model for numbers, stop.") "Full control" almost certainly has to mean a
+richer, more expressive *tag* vocabulary and the LLM's tags weighing more
+heavily in arbitration (e.g. less of Fly's autonomous, mood-driven
+override; more turns where an LLM tag is what decides whether/where chao
+moves) — not literal coordinates or parameter values from the model. Where
+exactly that line sits (how much autonomy Aliveness keeps vs. hands to the
+LLM, whether Fly's hysteresis becomes advisory rather than authoritative,
+how a richer vocabulary squares with §9's explicit "keep the vocabulary
+small, especially on the local backend") is a real design question, not
+an implementation detail.
+
+**Per CLAUDE.md's working style, this needs an `advisor`/Opus pass before
+any code**, same as every other prompt-design or aliveness-arbitration
+decision this session — it's a bigger version of the still-open §10.3
+arbitration question (LLM-directed vs. fully autonomous idle/movement)
+flagged repeatedly across this session and never resolved, now with the
+user explicitly asking to resolve it in the LLM's favor. Next session
+should start by rereading design doc §10 in full and framing the
+arbitration options for advisor before writing anything, rather than
+patching Fly's thresholds in isolation.
+
+**Follow-up, same day — one candidate cause already ruled out:** user
+asked chao for a heart bubble live and it didn't know how. Checked
+`director.py`: this is not a gap in the current tag/emote wiring, it's
+already-deliberate design. Line 43's `_TAG_TO_POOL` explicitly excludes
+`heart_bub`, commented "affinity-gated per §6.3, not a direct tag
+mapping" — heart is specced as a relationship signal earned through an
+affinity system (§6.3), not a regular emotion available on request, and
+that affinity system doesn't exist yet (needs phase 6 memory). So right
+now heart is correctly unreachable by anyone, including the streamer
+asking directly — not evidence chao needs "more control" or needs to
+"learn" it over sessions. Don't waste time re-diagnosing this next
+session; the real prerequisite is phase 6 affinity/memory, not a tag
+protocol fix. Separately, keep "mannerisms learned over time" (the
+reflection job's `beliefs`-table writes) as its own distinct future log
+entry if it comes up again — it's a personality-drift mechanism across
+sessions, unrelated to which tags exist within a single turn, and
+shouldn't get folded into the movement/emotion-control task above.
+
 ### Session 10, part 2: fly `x_range` eyeball check, plus a Y-axis and size scan
 
 Closed out session 9's other flagged loose end: `fly.x_range`'s exact

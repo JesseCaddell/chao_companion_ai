@@ -77,6 +77,19 @@ def test_sentence_split_across_chunks_buffers_correctly():
     assert director.process_chunk(" ") == ["Hi there!"]
 
 
+def test_action_narration_is_stripped_from_ready_sentence():
+    """Same backstop as tags.py's strip_actions, exercised through the real
+    process_chunk path — this is what actually reaches TTS and the OBS
+    subtitle overlay, not just the unit under tags.py.
+    """
+    director, _events = make_director()
+    director.begin_turn("t1")
+
+    ready = director.process_chunk("[happy] *flutters over here* Hi there! ")
+
+    assert ready == ["Hi there!"]
+
+
 def test_incomplete_sentence_waits_for_end_turn():
     director, events = make_director()
     director.begin_turn("t1")
