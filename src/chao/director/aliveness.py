@@ -9,6 +9,15 @@ audio exists, covering the 0.5-1.5s latency window with in-character
 behaviour instead of dead air. The head-tilt half of §10.5 is not built —
 same reason as the rest of §10, see below.
 
+Session 10 part 10 added a second reaction: `chat_spike` (design doc
+§4.1 tier 4, "velocity spike"), fired by `TwitchChatClient` tagging a
+background chat message `priority: 4` while its own rolling-window
+velocity tracker is above threshold. `Aliveness` fires whenever a
+qualifying `input.chat` event arrives, gated by its own cooldown tracker
+(see `_last_fired` below) since nothing else rate-limits a reaction fired
+off a per-message chat event the way turn cadence naturally rate-limits
+the anticipation nudge.
+
 Deliberately does **not** share Director's cooldown/hotkey-alternation
 state for the `curious` pool. The anticipation nudge fires at turn start;
 a `[curious]`/`[thinking]` tag in the reply itself typically lands well
@@ -57,7 +66,7 @@ from pathlib import Path
 
 import yaml
 
-from chao.director.director import EmoteConfig
+from chao.director.director import EmoteConfig, EmotePool
 from chao.events import Event, Kind
 
 _DEFAULT_POOL = "curious"
@@ -68,24 +77,65 @@ class Aliveness:
     emote_config: EmoteConfig
     publish: Callable[[Event], None]
     rng: random.Random = field(default_factory=random.Random)
+    clock: Callable[[], float] = time.monotonic
+
+    # Cooldown bookkeeping for chat_spike only -- see _fire_with_cooldown.
+    # anticipation stays intentionally ungated (below): it fires on every
+    # single brain.request by design (see the existing
+    # test_does_not_share_cooldown_with_tag_triggered_curious_emotes),
+    # since gating it would let the nudge silently suppress a
+    # [curious]/[thinking] tag's own emote on essentially every turn.
+    _last_fired: dict[str, float] = field(default_factory=dict, init=False)
 
     def handle(self, event: Event) -> None:
-        if event.kind != Kind.BRAIN_REQUEST:
+        if event.kind == Kind.BRAIN_REQUEST:
+            self._fire("anticipation", event.turn_id)
+        elif event.kind == Kind.INPUT_CHAT and event.payload.get("priority") == 4:
+            self._fire_with_cooldown("chat_spike", event.turn_id)
+
+    def _fire(self, reaction_key: str, turn_id: str | None) -> None:
+        pool_name, pool = self._resolve_pool(reaction_key)
+        if pool is None:
+            return
+        self._publish_emote(pool_name, pool, reaction_key, turn_id)
+
+    def _fire_with_cooldown(self, reaction_key: str, turn_id: str | None) -> None:
+        """Only chat_spike uses this: unlike the anticipation nudge (paced
+        by turn cadence), chat_spike fires once per qualifying chat
+        message while a velocity spike persists -- several times a second
+        with no gating otherwise. Aliveness deliberately doesn't share
+        Director's own cooldown state (see module docstring), so this is a
+        second, independent cooldown tracker, not a reuse of Director's.
+        """
+        pool_name, pool = self._resolve_pool(reaction_key)
+        if pool is None:
             return
 
-        pool_name = self.emote_config.reactions.get("anticipation", _DEFAULT_POOL)
+        now = self.clock()
+        last = self._last_fired.get(reaction_key)
+        if last is not None and now - last < pool.cooldown_s:
+            return
+        self._last_fired[reaction_key] = now
+        self._publish_emote(pool_name, pool, reaction_key, turn_id)
+
+    def _resolve_pool(self, reaction_key: str) -> tuple[str, EmotePool | None]:
+        pool_name = self.emote_config.reactions.get(reaction_key, _DEFAULT_POOL)
         pool = self.emote_config.pools.get(pool_name)
         if pool is None or not pool.hotkeys:
-            return
+            return pool_name, None
+        return pool_name, pool
 
+    def _publish_emote(
+        self, pool_name: str, pool: EmotePool, reaction_key: str, turn_id: str | None
+    ) -> None:
         self.publish(
             Event(
                 kind=Kind.DIRECTOR_EMOTE,
-                turn_id=event.turn_id,
+                turn_id=turn_id,
                 payload={
                     "pool": pool_name,
                     "hotkey_id": self.rng.choice(pool.hotkeys),
-                    "reason": "anticipation",
+                    "reason": reaction_key,
                 },
             )
         )

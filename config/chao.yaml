@@ -17,6 +17,25 @@ tts:
   # resolve_output_device) -- useful for local testing without OBS running.
   output_device: null
 
+twitch:                      # §4.1 chat input. See inputs/twitch.py.
+  channel: ""                # Twitch channel to join, lowercase, no leading '#'.
+                              # Empty disables chat input entirely (degrades
+                              # gracefully, same as tts.voice_path unset).
+  chao_names: [chao]         # any of these (word-boundary matched, case-
+                              # insensitive) appearing in a message scores it
+                              # tier 1 (mention) -- viewers spell it several ways.
+  velocity_window_s: 10      # rolling window for tier 4 (velocity spike) scoring.
+  velocity_threshold: 8      # messages within velocity_window_s to count as a
+                              # spike. Untuned placeholder -- untestable against
+                              # real traffic on a channel with no/few viewers, so
+                              # not yet live-verified against an actual spike.
+                              #
+                              # No bot account or OAuth token needed for this --
+                              # chat input is read-only, and Twitch allows
+                              # anonymous read-only IRC access. Set
+                              # TWITCH_OAUTH_TOKEN/TWITCH_BOT_USERNAME in .env if
+                              # send-back is ever built later.
+
 kill_switch:                # §15 physical kill switch. See inputs/killswitch.py.
                              # Built ahead of Twitch chat -- must exist before
                              # adversarial input goes live. Global hotkeys (pynput),

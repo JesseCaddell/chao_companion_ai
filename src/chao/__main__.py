@@ -38,6 +38,7 @@ from chao.director.mood import Mood, MoodConfig, load_mood_config
 from chao.director.motion import MotionConfig, load_motion_config
 from chao.events import Event, Kind
 from chao.inputs.killswitch import KillSwitch, load_kill_switch_config
+from chao.inputs.twitch import TwitchChatClient, TwitchConfig, load_twitch_config
 from chao.outputs.audio import AudioPlayer, resolve_output_device
 from chao.outputs.speech import Speaker, TTSConfig, load_tts_config
 from chao.outputs.tts import PiperBackend
@@ -329,6 +330,32 @@ async def _run_fly(bus: Bus, fly_config: FlyConfig) -> None:
         fly.handle(event)
 
 
+async def _run_twitch(bus: Bus, twitch_config: TwitchConfig) -> None:
+    """Connects to real Twitch IRC and publishes `input.chat` events.
+    Degrades gracefully (prints and returns), same shape as
+    `_run_vts_subscriber`'s "VTS unavailable" handling, for: no channel
+    configured, a connection failure, or the connection dropping later
+    (no reconnect loop -- see inputs/twitch.py's docstring).
+
+    Anonymous read by default -- TWITCH_OAUTH_TOKEN/TWITCH_BOT_USERNAME in
+    the environment switch to an authenticated connection, not required
+    for this chat-input-only build.
+    """
+    if not twitch_config.channel:
+        print("  (no twitch.channel configured in config/chao.yaml, chat input disabled)")
+        return
+    client = TwitchChatClient(
+        config=twitch_config,
+        publish=bus.publish,
+        oauth_token=os.environ.get("TWITCH_OAUTH_TOKEN"),
+        bot_username=os.environ.get("TWITCH_BOT_USERNAME"),
+    )
+    try:
+        await client.run()
+    except (OSError, RuntimeError) as e:
+        print(f"  (Twitch chat unavailable: {e})")
+
+
 async def _read_stdin_into_bus(bus: Bus) -> None:
     loop = asyncio.get_running_loop()
     while True:
@@ -357,6 +384,7 @@ async def main() -> None:
     motion_config = load_motion_config(CHAO_CONFIG_PATH)
     idle_drift_config = load_idle_drift_config(CHAO_CONFIG_PATH)
     kill_switch_config = load_kill_switch_config(CHAO_CONFIG_PATH)
+    twitch_config = load_twitch_config(CHAO_CONFIG_PATH)
 
     cloud = AnthropicBackend()  # reads ANTHROPIC_API_KEY from the environment
     local = OllamaBackend(os.environ.get("CHAO_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL))
@@ -386,6 +414,7 @@ async def main() -> None:
     aliveness_task = asyncio.create_task(_run_aliveness(bus, emote_config))
     mood_task = asyncio.create_task(_run_mood(bus, mood_config))
     fly_task = asyncio.create_task(_run_fly(bus, fly_config))
+    twitch_task = asyncio.create_task(_run_twitch(bus, twitch_config))
     run_task = asyncio.create_task(bus.run(orchestrator))
 
     print(
@@ -412,6 +441,7 @@ async def main() -> None:
         aliveness_task.cancel()
         mood_task.cancel()
         fly_task.cancel()
+        twitch_task.cancel()
         await asyncio.gather(
             run_task,
             error_task,
@@ -420,6 +450,7 @@ async def main() -> None:
             aliveness_task,
             mood_task,
             fly_task,
+            twitch_task,
             return_exceptions=True,
         )
 

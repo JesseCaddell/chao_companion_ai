@@ -450,6 +450,134 @@ advisor's review without needing a separate isolated script.
 Kill switch complete before Twitch chat work begins, per advisor's explicit
 ordering call and design doc §15. Next: raw IRC chat client.
 
+### Session 10, part 10: raw IRC Twitch chat client (§4.1)
+
+Second and final piece of "Twitch chat." Consulted `advisor` again before
+writing code, with a concrete design already sketched from orientation.
+Its review caught two things that would have been silent live-run failures
+and confirmed the rest of the design was sound:
+
+- **Handshake ordering.** Twitch can silently ignore a `JOIN` sent before
+  the server finishes its connection-registration sequence — `CAP REQ`
+  first, then `PASS`/`NICK`, then wait for `001` (`RPL_WELCOME`), *then*
+  `JOIN`. Not something review alone could settle — advisor's explicit
+  instruction was to verify it against a real channel before writing tests
+  or the real client, not assume. Did exactly that (see below).
+- **Mention detection false-positives.** The first-draft plan used
+  substring matching (`"chao" in text`), which fires on "chaos", "chaotic",
+  etc. — an immediate problem given `chao` is the actual configured name.
+  Fixed with a word-boundary regex (`\bchao\b`) before any code was
+  written, not discovered live.
+- **`chat_spike` needs its own cooldown, confirmed by re-reading
+  `aliveness.py`'s own docstring:** `Aliveness` deliberately doesn't share
+  `Director`'s cooldown state, and unlike the anticipation nudge (paced by
+  turn cadence), `chat_spike` fires once per qualifying chat message —
+  several times a second during a real spike with no gating otherwise.
+  Real, not theoretical: the live check below hit 223 spike-tier messages
+  in 15 seconds.
+
+**Verified against real Twitch traffic before writing the regex or tests**
+(advisor: "answerable by connecting to a real channel and printing raw
+lines, not by review") — a throwaway probe script (not committed)
+connected anonymously to a busy public channel and printed ~30s of raw
+IRC output. Confirmed the handshake sequence live (`CAP * ACK` → `001`...
+`376` welcome block → `JOIN` → `353`/`366` NAMES → real `PRIVMSG` lines)
+and that the tag+PRIVMSG regex matches real captured lines, not just
+hand-written ones.
+
+**New file `src/chao/inputs/twitch.py`**:
+- `parse_tags`/`parse_privmsg` — pure functions, regex verified against
+  real traffic (see above).
+- `score_priority(text, chao_names)` — §4.1 tiers 1/2/5 from message text
+  alone. Tier 3 (high-affinity viewer) needs the phase-6 affinity system
+  to score at all; folded into tier 5 with a documented gap rather than
+  guessed at.
+- `VelocityTracker` — tier 4, a rolling-window message-rate counter
+  (`window_s`/`threshold`, clock-injectable like `Fly`/`IdleDrift`).
+  Config's own comment originally called this "untestable against real
+  traffic on a quiet channel" — turned out very testable against a *busy*
+  one instead (see live check below).
+- `TwitchChatClient` — raw IRC over the existing `websockets` dependency,
+  not `twitchio` (dropped last part: 2.x/3.x have incompatible auth flows
+  with no way to pin which `uv add twitchio` would resolve to). Anonymous
+  read (`justinfanNNNNN`, no password) by default — this build is chat
+  *input* only, no send-back, so **no bot account or OAuth token is
+  required** for what got built this pass. `TWITCH_OAUTH_TOKEN`/
+  `TWITCH_BOT_USERNAME` in the environment switch to an authenticated
+  connection if send-back is ever built later — the user's own bot-account
+  setup from earlier in this session isn't wasted, just not yet needed.
+  `connect` is injectable (same shape as `PiperBackend`/`SoundDeviceSink`)
+  so tests don't open a real socket. No reconnect-on-drop logic —
+  degrades the same way `_run_vts_subscriber` does on VTS-unavailable:
+  the task ends, chat input goes quiet until restart. Deliberately not
+  built this pass, same "no real consumer yet" discipline as earlier
+  sessions' cuts.
+- `TwitchConfig`/`load_twitch_config` — same load/assemble split as every
+  other config in this project. New `twitch:` block in `config/chao.yaml`
+  (`channel: ""` disables chat input entirely, same degrade-not-crash
+  shape as `tts.voice_path` unset).
+
+**`director/aliveness.py`: `chat_spike` finally has a consumer.**
+`reactions.chat_spike: surprise` had sat unused in `emotes.yaml` since
+session 8. `Aliveness.handle` now also reacts to `input.chat` events with
+`priority == 4`, refactored into `_fire` (anticipation, unchanged —
+deliberately ungated, confirmed by not breaking the existing
+`test_does_not_share_cooldown_with_tag_triggered_curious_emotes`) and a
+new `_fire_with_cooldown` (chat_spike only) sharing an emote-publish
+helper. A real regression was caught and fixed before committing: an
+earlier draft applied the same cooldown check to *both* reactions,
+which broke that exact existing test — anticipation's whole design point
+is firing on every single turn regardless of the `curious` pool's own
+cooldown, so the fix scoped cooldown tracking to chat_spike specifically,
+not generically to `_fire`.
+
+**Wired into `__main__.py`**: `_run_twitch(bus, twitch_config)`, same
+degrade-gracefully shape as `_run_vts_subscriber` (missing channel config
+→ print and return; connection failure → catch `OSError`/`RuntimeError`,
+print, return). Added to the task list and shutdown cancel/gather in
+`main()`, no new dependency (`websockets` already there).
+
+**19 new tests** (`tests/test_inputs_twitch.py`): tag/PRIVMSG parsing
+(including the non-message-line rejection cases), `score_priority`'s
+word-boundary fix specifically (`"chaos"` must not match `"chao"`),
+`VelocityTracker`'s spike/no-spike/window-expiry cases, `load_twitch_config`'s
+three cases, and `TwitchChatClient` end-to-end against a `FakeWebSocket`
+(handshake order both anonymous and authenticated, PING/PONG, per-message
+event shape, spike-tier upgrade applying to background chat but *not* to
+an existing mention). **6 new tests** in `test_director_aliveness.py` for
+the `chat_spike` wiring and the anticipation/chat_spike cooldown
+independence. Full suite: **264 passed**, ruff clean, format clean.
+
+**Live-verified end-to-end against real Twitch, real busy channel, no
+credentials** — the actual production `TwitchChatClient`/`TwitchConfig`,
+not a reimplementation: connected anonymously, watched for 15s, printed
+every published `input.chat` event's tier. Real results: **`{1: 0, 2: 5,
+4: 223, 5: 7}`** — zero mentions (none said "chao" in this window,
+expected, not a failure), 5 real questions correctly tiered, and the
+velocity tracker correctly upgraded 223 of 235 messages to spike tier
+once the rolling window filled past threshold on a genuinely busy
+channel — the exact case the config comment had called "untestable"
+before this check. Handshake, PING/PONG, and PRIVMSG parsing all
+confirmed working against real traffic, not just the fake-websocket
+tests. (One console-only snag, not a code bug: the throwaway live-check
+script's own `print()` crashed twice on Windows' cp1252 stdout hitting
+emoji in real chat text/display names — fixed in the script with an
+ascii-safe preview encode; the actual pipeline never prints raw chat text
+to console, so this doesn't apply to production code.)
+
+**Design doc §4.1's Twitch-chat phase is now functionally complete** for
+what this pass scoped: real connection, real parsing, real priority
+scoring feeding the already-built arbiter (`bus.py`), and a real non-verbal
+consequence (`chat_spike`) for the one tier that previously had none.
+Deliberately not built this pass: chat output filtering/username
+sanitization beyond `display_name`-preferred (already existed in
+`brain/turn.py`), a global rate-limit backstop, and per-prompt/response
+session logging beyond what `Kind.BRAIN_COMPLETE`/`OUTPUT_SPEECH_*`
+already give the dashboard/JSONL log — all still open per design doc §15,
+not yet scoped with the user this pass.
+
+Not yet committed at time of writing.
+
 Picked up with a custom Piper voice (`.onnx`, user-trained) ready for
 testing, plus a review of the not-yet-implemented
 `docs/tts_pronunciation_overrides.md` design note.

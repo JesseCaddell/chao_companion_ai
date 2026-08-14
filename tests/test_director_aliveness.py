@@ -21,17 +21,41 @@ def make_config(reactions: dict[str, str] | None = None) -> EmoteConfig:
         pools={
             "curious": EmotePool(hotkeys=["question.exp3.json"], cooldown_s=3.0, duration_s=2.0),
             "happy": EmotePool(hotkeys=["happy.exp3.json"], cooldown_s=4.0, duration_s=2.5),
+            "surprise": EmotePool(hotkeys=["surprise.exp3.json"], cooldown_s=6.0, duration_s=1.5),
         },
-        reactions=reactions if reactions is not None else {"anticipation": "curious"},
+        reactions=reactions
+        if reactions is not None
+        else {"anticipation": "curious", "chat_spike": "surprise"},
     )
 
 
-def make_aliveness(config=None) -> tuple[Aliveness, list[Event]]:
+def make_aliveness(config=None, clock=None) -> tuple[Aliveness, list[Event]]:
     events: list[Event] = []
-    aliveness = Aliveness(
-        emote_config=config or make_config(), publish=events.append, rng=random.Random(0)
-    )
+    kwargs = {
+        "emote_config": config or make_config(),
+        "publish": events.append,
+        "rng": random.Random(0),
+    }
+    if clock is not None:
+        kwargs["clock"] = clock
+    aliveness = Aliveness(**kwargs)
     return aliveness, events
+
+
+def spike_chat(turn_id: str = "t1") -> Event:
+    return Event(
+        kind=Kind.INPUT_CHAT,
+        turn_id=turn_id,
+        payload={"login": "someone", "text": "hi", "priority": 4},
+    )
+
+
+def background_chat(turn_id: str = "t1") -> Event:
+    return Event(
+        kind=Kind.INPUT_CHAT,
+        turn_id=turn_id,
+        payload={"login": "someone", "text": "hi", "priority": 5},
+    )
 
 
 def test_brain_request_fires_the_configured_reaction_pool():
@@ -87,6 +111,56 @@ def test_missing_pool_in_config_does_not_crash():
     aliveness.handle(Event(kind=Kind.BRAIN_REQUEST, turn_id="t1"))
 
     assert events == []
+
+
+def test_tier_four_chat_fires_the_chat_spike_reaction():
+    aliveness, events = make_aliveness()
+
+    aliveness.handle(spike_chat())
+
+    assert len(events) == 1
+    assert events[0].kind == Kind.DIRECTOR_EMOTE
+    assert events[0].payload["pool"] == "surprise"
+    assert events[0].payload["reason"] == "chat_spike"
+
+
+def test_background_chat_below_spike_tier_does_not_fire():
+    aliveness, events = make_aliveness()
+
+    aliveness.handle(background_chat())
+
+    assert events == []
+
+
+def test_chat_spike_reaction_respects_its_pool_cooldown():
+    clock = FakeClock()
+    aliveness, events = make_aliveness(clock=clock)
+
+    aliveness.handle(spike_chat())
+    aliveness.handle(spike_chat())  # immediately after -- within surprise's 6s cooldown
+
+    assert len(events) == 1
+
+
+def test_chat_spike_reaction_fires_again_after_cooldown_elapses():
+    clock = FakeClock()
+    aliveness, events = make_aliveness(clock=clock)
+
+    aliveness.handle(spike_chat())
+    clock.advance(6.5)  # past surprise's 6s cooldown
+    aliveness.handle(spike_chat())
+
+    assert len(events) == 2
+
+
+def test_anticipation_and_chat_spike_cooldowns_are_tracked_independently():
+    clock = FakeClock()
+    aliveness, events = make_aliveness(clock=clock)
+
+    aliveness.handle(Event(kind=Kind.BRAIN_REQUEST, turn_id="t1"))
+    aliveness.handle(spike_chat())  # different reaction key -- must not be blocked
+
+    assert len(events) == 2
 
 
 def make_fly_config(**overrides) -> FlyConfig:
