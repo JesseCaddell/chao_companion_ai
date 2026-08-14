@@ -17,6 +17,30 @@ tts:
   # resolve_output_device) -- useful for local testing without OBS running.
   output_device: null
 
+voice:                        # §4.1/§5 voice input. See inputs/voice.py.
+  enabled: false               # off by default -- continuous mic capture is a
+                                # real privacy-relevant behavior change, opt in
+                                # explicitly once VAD/echo behavior is tuned.
+  input_device: null           # case-insensitive substring match against the
+                                # mic device list, like tts.output_device. null
+                                # uses the system default input device.
+  sample_rate: 16000            # required by both Silero VAD and faster-whisper.
+  frame_samples: 512            # Silero's recommended chunk size at 16kHz (32ms).
+  vad_threshold: 0.5            # speech-probability cutoff, Silero's own default.
+  silence_ms: 500                # design doc §4.1: "the single biggest perceptual
+                                  # latency lever" -- tune by feel once live.
+  min_speech_ms: 250             # utterances shorter than this are discarded as
+                                  # noise blips, not transcribed.
+  max_utterance_s: 30            # safety cap if VAD never detects silence.
+  whisper_model: base            # design doc §18.
+  whisper_compute_type: int8     # design doc §18 -- CPU-friendly quantization.
+  whisper_language: en           # pinned, not auto-detected -- short utterances
+                                  # make language auto-detection unreliable.
+  vad_model_path: data/vad/silero_vad.onnx  # raw ONNX, not the silero-vad pip
+                                              # package -- see inputs/voice.py's
+                                              # module docstring for why (it pulls
+                                              # a ~200MB CPU torch install).
+
 twitch:                      # §4.1 chat input. See inputs/twitch.py.
   channel: ""                # Twitch channel to join, lowercase, no leading '#'.
                               # Empty disables chat input entirely (degrades

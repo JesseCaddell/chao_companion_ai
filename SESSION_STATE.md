@@ -601,6 +601,144 @@ of the "(Twitch chat unavailable: ...)" degrade message, not by traffic).
 No test changes — this is `__main__.py` env-reading glue, same
 untested-by-design category as `_attach_motion`/`_run_vts_subscriber`.
 
+### Session 10, part 12: voice input (§4.1, §5) — VAD, STT, and a real bug found live
+
+User picked voice input next ("let's move on to voice"). Design doc §18
+names `silero-vad` + `faster-whisper` (`base`/int8/CPU); consulted
+`advisor` before building given the real-time audio + new I/O + echo/
+barge-in questions involved. Its four points all got addressed:
+
+- **Dependency footprint checked, not assumed.** `uv add faster-whisper`
+  pulls `ctranslate2`/`av`/`huggingface-hub` — no torch, CPU-friendly,
+  fine. `uv add silero-vad` pulled a full ~200MB CPU `torch` (+
+  `torchaudio`/`sympy`/`networkx`) for a 2.3MB model file — exactly the
+  footprint bloat invariant 1 exists to prevent. Removed it; downloaded
+  the raw ONNX model directly from the upstream repo
+  (`src/silero_vad/data/silero_vad.onnx`) into `data/vad/` (gitignored,
+  same treatment as `data/voices/*.onnx`) and load it straight through
+  `onnxruntime`, already present transitively via `piper-tts`.
+- **Barge-in and echo resolved together, deliberately, not separately.**
+  `bus.py`'s strict `priority > self._current.priority` means a second
+  voice utterance can't currently preempt an in-flight voice turn —
+  loosening that is a bus-contract change (CLAUDE.md escalation trigger).
+  Rather than touch it, `VoiceInput` gates on `output.speech_start`/
+  `output.speech_end` (`on_speech_start`/`on_speech_end`, driven by
+  `__main__.py`'s `_run_voice` watching the bus): an utterance whose
+  endpoint lands while the chao is mid-speech is discarded *before STT
+  ever runs on it*, not just before publishing. This solves the real,
+  not-hypothetical feedback-loop risk (`tts.output_device: null` means
+  chao's voice comes out the speakers by default, which the mic can pick
+  back up) and, as a direct consequence, also means the streamer can't
+  currently interrupt the chao mid-sentence. Logged as a known, deliberate
+  scope cut in `inputs/voice.py`'s module docstring — real barge-in needs
+  acoustic echo cancellation against a known reference signal, out of
+  scope this pass, same shape as `inputs/twitch.py`'s "no reconnect loop"
+  cut.
+- **Cooldown exemption double-checked, not just assumed correct**:
+  `Priority.VOICE = 4`, `_arbitrate`'s cooldown check is
+  `priority < Priority.VOICE`, so voice is exempt — confirmed by reading
+  the code, not just remembering it, before it could silently make a live
+  check look like a VAD failure.
+- **faster-whisper validated against a real synthesized WAV before any
+  mic work**, per advisor's explicit ordering: ~500ms for a ~3s clip
+  (design doc §12 budgets 300ms; close enough, not chased further),
+  word-perfect transcription once audio reached faster-whisper's own
+  `decode_audio` resampling path (a hand-rolled resample attempt produced
+  garbled output first — a real bug in the probe script, not Piper voice
+  quality, confirmed by feeding the exact same audio through the correct
+  path afterward).
+
+**New file `src/chao/inputs/voice.py`**: `SileroVAD` (raw ONNX wrapper),
+`VoiceEndpointer` (hold-until-silence state machine, same clock-injectable
+shape as `IdleDrift`/`Fly` — buffers speech, endpoints after `silence_ms`
+of non-speech, discards utterances under `min_speech_ms` as noise blips,
+force-endpoints at `max_utterance_s` as a safety cap), `WhisperBackend`
+(lazy-loaded like `PiperBackend`, `avg_logprob` mapped to a rough `(0,1]`
+confidence via `exp()`), `VoiceInput` (ties mic capture to the endpointer
+and STT, publishes `Kind.INPUT_VOICE`), `resolve_input_device` (mirrors
+`outputs/audio.py`'s `resolve_output_device`, input-filtered).
+`VoiceConfig.enabled` defaults **false** — continuous mic capture is a
+real privacy-relevant behavior change, same opt-in shape as
+`tts.voice_path`/`twitch.channel` defaulting to unset. Mic capture's
+callback fires on its own thread (`sounddevice`, same as `AudioPlayer`/
+`KillSwitch`) and marshals onto the loop via `call_soon_threadsafe`, same
+pattern as `KillSwitch`. New `voice:` block in `config/chao.yaml`.
+Wired into `__main__.py` as `_run_voice`, same degrade-gracefully shape
+as `_run_vts_subscriber`/`_run_twitch`.
+
+**A real, subtle bug found live, not caught by any test**: the very
+first `SileroVAD` implementation fed bare 512-sample chunks straight to
+the ONNX model. Every live mic test — close to the mic, at normal
+distance, at both the forced pipeline rate and the device's native rate,
+through a from-scratch streaming resampler built to rule out a rate-
+coercion theory — produced the same result: plausible audio amplitude
+(confirmed by parallel raw-capture and native-capture-then-whisper-file-
+decode tests, both of which transcribed correctly) but near-zero VAD
+probability (max ~0.001-0.003), regardless of how loud or close the
+speech was. Six separate live mic tests across several theories (device
+selection, sample-rate coercion, channel-forcing, software resampling)
+before finding the real cause: read Silero's own reference
+`OnnxWrapper.__call__` (upstream `silero-vad` repo's `utils_vad.py`,
+fetched via `gh api`) and found the model requires a **64-sample context
+prefix** carried from the tail of the previous chunk — `input` is
+actually `context_size + chunk_size` (576 samples at 16kHz), not bare
+512. The ONNX graph's `input` dimension is fully dynamic (`[None, None]`),
+so the wrong-sized input never raised — it just silently produced
+numerically-plausible-but-wrong output at every single stage of
+debugging, which is why amplitude-only checks (peak/RMS) kept passing
+while the actual probabilities stayed dead. Fixed: `SileroVAD` now
+maintains `self._context` (initialized to `context_size` zeros, updated
+to the last `context_size` samples of `context + chunk` after every
+call, reset alongside `self._state` at utterance boundaries), matching
+the reference implementation exactly. **Also confirms the earlier
+"Piper TTS audio doesn't trigger VAD" finding logged in this same
+module's docstring during initial writing was never actually
+established** — that test ran through the same buggy code path, so it
+was likely this bug too, not a real TTS-vs-human-speech distinction;
+left the docstring's phrasing but this note supersedes its confidence
+level. Not re-tested against TTS audio specifically since it isn't a
+live consumer right now (nothing feeds the chao's own synthesized speech
+through VAD) and the human-speech path is what matters for this feature.
+
+**Verified fixed, live, end-to-end**, real mic (Yeti Stereo Microphone,
+confirmed as the actual default input device via `sd.query_devices`),
+real VAD, real whisper, the actual production `VoiceInput`/
+`VoiceEndpointer`/`SileroVAD`/`WhisperBackend` classes: `VAD state:
+idle -> speaking` / `speaking -> idle` transitions matched real speech
+timing throughout a 30s session, and 9 of 9 utterances transcribed with
+sensible, largely-accurate text ("Testing, testing.", "Testing 1, 2, 3",
+"Thank you.", "Let's say you can hear me.", etc.), confidence scores in
+the 0.36-0.64 range. A quick isolated re-check of the raw fixed
+`SileroVAD` alone (no whisper) at normal talking distance, pre-existing
+the full pipeline check: `mean=0.72 max=1.00 frac_above_0.5=0.72` over
+250 chunks — decisive confirmation the context fix was the actual root
+cause, not a coincidence.
+
+**22 new tests** (`tests/test_inputs_voice.py`): `VoiceEndpointer`'s
+hold/endpoint/discard/max-duration/state-reset cases (scripted-VAD fakes,
+`FakeClock`, no real ONNX needed), `WhisperBackend`'s segment-joining/
+confidence-math/empty-result cases (fake underlying model), `load_voice_
+config`'s three cases, `resolve_input_device`'s no-op cases, and
+`VoiceInput`'s echo-guard behavior specifically (discards without ever
+calling STT while `_speaking`, lifts after `on_speech_end`, publishes
+correctly otherwise) — no committed test depends on the real ONNX/
+Whisper model files existing, same "fakes only in the suite, real models
+verified via live-check scripts" precedent as `PiperBackend`. Full suite:
+**285 passed**, ruff clean, format clean.
+
+**Not built this pass, deliberately**: real barge-in (needs AEC, logged
+above), tier-3-style "who is speaking" identification (single streamer
+assumed), any reconnect/retry logic if the mic stream errors mid-session
+(same degrade-not-crash-but-don't-auto-recover shape as `inputs/twitch.py`).
+**User's own idea, logged not built**: routing audio through a Discord
+voice-call-style bot architecture instead of raw local mic capture —
+raised mid-debugging as a "maybe we should go this route instead" aside.
+Not chased this session (the raw-capture approach ended up working once
+the real bug was found), but worth remembering as an alternative
+architecture if local mic capture ever proves troublesome in practice —
+would trade this module's `sounddevice`/VAD/whisper stack for Discord's
+voice API and someone else's audio pipeline.
+
 Picked up with a custom Piper voice (`.onnx`, user-trained) ready for
 testing, plus a review of the not-yet-implemented
 `docs/tts_pronunciation_overrides.md` design note.

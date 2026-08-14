@@ -40,6 +40,7 @@ from chao.director.motion import MotionConfig, load_motion_config
 from chao.events import Event, Kind
 from chao.inputs.killswitch import KillSwitch, load_kill_switch_config
 from chao.inputs.twitch import TwitchChatClient, TwitchConfig, load_twitch_config
+from chao.inputs.voice import VoiceConfig, VoiceInput, load_voice_config
 from chao.outputs.audio import AudioPlayer, resolve_output_device
 from chao.outputs.speech import Speaker, TTSConfig, load_tts_config
 from chao.outputs.tts import PiperBackend
@@ -377,6 +378,40 @@ async def _run_twitch(bus: Bus, twitch_config: TwitchConfig) -> None:
         print(f"  (Twitch chat unavailable: {e})")
 
 
+async def _run_voice(bus: Bus, voice_config: VoiceConfig) -> None:
+    """Connects the mic and publishes `input.voice` events. Degrades
+    gracefully (prints and returns), same shape as `_run_vts_subscriber`'s
+    "VTS unavailable" handling, for: voice disabled in config, or a stream
+    open/device failure.
+
+    Also watches `output.speech_start`/`output.speech_end` to drive
+    `VoiceInput`'s echo guard (see inputs/voice.py's module docstring) --
+    a second concurrent loop over the same bus subscription, since
+    `VoiceInput.run()` itself only knows about mic audio, not the bus.
+    """
+    if not voice_config.enabled:
+        print("  (voice.enabled is false in config/chao.yaml, mic input disabled)")
+        return
+    voice_input = VoiceInput(config=voice_config, publish=bus.publish)
+    sub = bus.subscribe()
+
+    async def watch_speech_state() -> None:
+        while True:
+            event = await sub.get()
+            if event.kind == Kind.OUTPUT_SPEECH_START:
+                voice_input.on_speech_start()
+            elif event.kind == Kind.OUTPUT_SPEECH_END:
+                voice_input.on_speech_end()
+
+    watch_task = asyncio.create_task(watch_speech_state())
+    try:
+        await voice_input.run()
+    except (OSError, RuntimeError) as e:
+        print(f"  (voice input unavailable: {e})")
+    finally:
+        watch_task.cancel()
+
+
 async def _read_stdin_into_bus(bus: Bus) -> None:
     loop = asyncio.get_running_loop()
     while True:
@@ -406,6 +441,7 @@ async def main() -> None:
     idle_drift_config = load_idle_drift_config(CHAO_CONFIG_PATH)
     kill_switch_config = load_kill_switch_config(CHAO_CONFIG_PATH)
     twitch_config = load_twitch_config(CHAO_CONFIG_PATH)
+    voice_config = load_voice_config(CHAO_CONFIG_PATH)
 
     cloud = AnthropicBackend()  # reads ANTHROPIC_API_KEY from the environment
     local = OllamaBackend(os.environ.get("CHAO_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL))
@@ -436,6 +472,7 @@ async def main() -> None:
     mood_task = asyncio.create_task(_run_mood(bus, mood_config))
     fly_task = asyncio.create_task(_run_fly(bus, fly_config))
     twitch_task = asyncio.create_task(_run_twitch(bus, twitch_config))
+    voice_task = asyncio.create_task(_run_voice(bus, voice_config))
     run_task = asyncio.create_task(bus.run(orchestrator))
 
     print(
@@ -463,6 +500,7 @@ async def main() -> None:
         mood_task.cancel()
         fly_task.cancel()
         twitch_task.cancel()
+        voice_task.cancel()
         await asyncio.gather(
             run_task,
             error_task,
@@ -472,6 +510,7 @@ async def main() -> None:
             mood_task,
             fly_task,
             twitch_task,
+            voice_task,
             return_exceptions=True,
         )
 

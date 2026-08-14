@@ -9,5 +9,6 @@ data/sessions/*.jsonl
 data/vts_token.txt
 data/voices/*.onnx
 data/voices/*.onnx.json
+data/vad/*.onnx
 src/chao/dashboard/web/node_modules/
 src/chao/dashboard/web/dist/
