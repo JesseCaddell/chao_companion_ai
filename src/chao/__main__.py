@@ -20,6 +20,7 @@ import asyncio
 import os
 import random
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import uvicorn
@@ -337,17 +338,37 @@ async def _run_twitch(bus: Bus, twitch_config: TwitchConfig) -> None:
     configured, a connection failure, or the connection dropping later
     (no reconnect loop -- see inputs/twitch.py's docstring).
 
-    Anonymous read by default -- TWITCH_OAUTH_TOKEN/TWITCH_BOT_USERNAME in
-    the environment switch to an authenticated connection, not required
-    for this chat-input-only build.
+    `TWITCH_CHANNEL` in the environment overrides `twitch.channel` in
+    `config/chao.yaml` -- the channel is instance-specific (whose stream
+    this is), not a tuning value, so it belongs with the other per-user
+    secrets in `.env` rather than the committed yaml. Anonymous read is
+    still the default (session 10 part 10's live check needed no
+    credentials at all); `TWITCH_ACCESS_TOKEN`/`TWITCH_BOT_USERNAME`
+    switch to an authenticated connection if set. Twitch's OAuth token
+    endpoint hands back a bare access token with no `oauth:` prefix --
+    IRC's PASS command needs that prefix, so it's added here if missing
+    rather than requiring the user to store it pre-formatted.
     """
-    if not twitch_config.channel:
-        print("  (no twitch.channel configured in config/chao.yaml, chat input disabled)")
+    channel = os.environ.get("TWITCH_CHANNEL") or twitch_config.channel
+    if not channel:
+        print(
+            "  (no Twitch channel configured -- set TWITCH_CHANNEL in .env or "
+            "twitch.channel in config/chao.yaml, chat input disabled)"
+        )
         return
+    if channel != twitch_config.channel:
+        twitch_config = replace(twitch_config, channel=channel)
+
+    access_token = os.environ.get("TWITCH_ACCESS_TOKEN")
+    oauth_token = (
+        access_token
+        if access_token is None or access_token.startswith("oauth:")
+        else f"oauth:{access_token}"
+    )
     client = TwitchChatClient(
         config=twitch_config,
         publish=bus.publish,
-        oauth_token=os.environ.get("TWITCH_OAUTH_TOKEN"),
+        oauth_token=oauth_token,
         bot_username=os.environ.get("TWITCH_BOT_USERNAME"),
     )
     try:

@@ -578,6 +578,29 @@ not yet scoped with the user this pass.
 
 Committed (`1bec92f`).
 
+**Follow-up fix, same day:** user filled in `.env` with real Twitch
+credentials independently (`TWITCH_CHANNEL`, `TWITCH_BOT_USERNAME`,
+`TWITCH_ACCESS_TOKEN`, plus `TWITCH_REFRESH_TOKEN`/`TWITCH_CLIENT_ID` from
+a proper OAuth app registration, not the simple token-generator flow
+originally described). Two mismatches with what got built: (1) the channel
+was only ever read from `config/chao.yaml`'s `twitch.channel`, which
+defaults to `""` — `.env`'s `TWITCH_CHANNEL` was silently ignored; (2) the
+token env var name was `TWITCH_OAUTH_TOKEN` in code vs. the user's
+`TWITCH_ACCESS_TOKEN`, and a raw OAuth access token has no `oauth:` prefix,
+which IRC's `PASS` command requires. Fixed in `_run_twitch`: `TWITCH_CHANNEL`
+now overrides `twitch.channel` (channel is instance-specific, belongs with
+`.env`'s other secrets, not the committed yaml), reads `TWITCH_ACCESS_TOKEN`,
+and prepends `oauth:` if the value doesn't already have it. No refresh-token
+handling built — an expired access token just fails the connection the same
+way any other connection failure degrades (print, return); refreshing via
+`TWITCH_REFRESH_TOKEN`/`TWITCH_CLIENT_ID` is a real future need but not
+scoped this pass. Live-verified against the user's actual channel/
+credentials with no errors (zero messages received, but the channel was
+offline at check time — connection/auth success confirmed by the absence
+of the "(Twitch chat unavailable: ...)" degrade message, not by traffic).
+No test changes — this is `__main__.py` env-reading glue, same
+untested-by-design category as `_attach_motion`/`_run_vts_subscriber`.
+
 Picked up with a custom Piper voice (`.onnx`, user-trained) ready for
 testing, plus a review of the not-yet-implemented
 `docs/tts_pronunciation_overrides.md` design note.
