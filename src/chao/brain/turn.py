@@ -52,6 +52,14 @@ class TurnOrchestrator:
     # history starting with an assistant Turn, which the Anthropic API
     # rejects (first message must be "user").
     history_limit: int = 40
+    # A pinned local backend (CHAO_LLM_BACKEND=local) has no
+    # CircuitBreakerBackend watching it, so a slow-to-first-token turn (e.g.
+    # Ollama under real CPU contention with VTS/OBS — see brain/local.py's
+    # module docstring) and a genuinely dead backend look identical from
+    # outside: total silence. This doesn't fall back or cancel anything —
+    # it just stops the silence from being ambiguous. If no chunk arrives
+    # within this many seconds, publish once and keep waiting.
+    stall_warning_s: float = 8.0
 
     _history: deque[Turn] = field(default_factory=deque, init=False)
 
@@ -103,8 +111,11 @@ class TurnOrchestrator:
             speech_queue = asyncio.Queue()
             speech_task = asyncio.create_task(self._drain_speech(speech_queue, turn_id, cancel))
 
+        stall_task = asyncio.create_task(self._warn_if_stalled(turn_id))
         try:
             async for chunk in self.backend.stream(prompt.system, prompt.messages, cancel):
+                if not stall_task.done():
+                    stall_task.cancel()
                 raw_chunks.append(chunk)
                 self.publish(Event(kind=Kind.BRAIN_TOKEN, turn_id=turn_id, payload={"text": chunk}))
                 sentences = self.director.process_chunk(chunk)
@@ -172,6 +183,17 @@ class TurnOrchestrator:
             if speech_queue is not None and speech_task is not None:
                 speech_queue.put_nowait(None)
                 await speech_task
+            stall_task.cancel()
+
+    async def _warn_if_stalled(self, turn_id: str) -> None:
+        await asyncio.sleep(self.stall_warning_s)
+        self.publish(
+            Event(
+                kind=Kind.BRAIN_STALLED,
+                turn_id=turn_id,
+                payload={"waited_s": self.stall_warning_s},
+            )
+        )
 
     async def _drain_speech(
         self, queue: asyncio.Queue[str | None], turn_id: str, cancel: asyncio.Event

@@ -1,6 +1,36 @@
 # App-level config not tied to emote/mood/fly tuning (those live in
 # emotes.yaml). See design doc §18.
 
+ollama:                     # §5.2 local CPU backend. See brain/local.py.
+                             # Live-measured, not guessed: with VTS+OBS open,
+                             # an unthrottled local turn went from ~5s to
+                             # ~84s to first content token (real
+                             # prompt_eval_duration/eval_duration both ~20x
+                             # slower, confirmed via /api/chat's own stats --
+                             # raw CPU contention, not a prompt-handling
+                             # artifact). Both values below fixed it; see
+                             # brain/local.py's module docstring for the full
+                             # investigation and numbers.
+  num_thread: 8              # caps Ollama's CPU footprint so VTS/OBS keep
+                              # scheduling headroom -- 8 of 24 logical
+                              # threads on this machine (5900X, 12C/24T).
+                              # Restored baseline speed with VTS+OBS open,
+                              # with no measured cost to Ollama's own
+                              # throughput. Per-request (options.num_thread),
+                              # not OLLAMA_NUM_THREAD -- that env var only
+                              # takes effect at Ollama *server* start, so a
+                              # shell/machine-scoped var silently does
+                              # nothing without a server restart.
+  think: false                # qwen3's default "thinking" mode burns most of
+                               # the generation budget on tokens that never
+                               # reach content -- confirmed eval_count
+                               # dropped from ~170-250 to ~24 with this off,
+                               # real content arriving right after prompt
+                               # eval instead of buried at the very end.
+                               # chao's replies are short/tag-driven, not the
+                               # multi-step-reasoning case thinking mode is
+                               # for.
+
 tts:
   # Path to the Piper .onnx model; a same-named .onnx.json config must sit
   # next to it (Piper's own convention -- both files are gitignored under

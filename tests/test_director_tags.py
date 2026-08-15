@@ -1,4 +1,4 @@
-from chao.director.tags import ParsedTag, parse_tags, split_sentences, strip_actions
+from chao.director.tags import ParsedTag, parse_tags, split_sentences, strip_actions, strip_emoji
 
 
 def test_simple_tag_is_parsed_and_stripped():
@@ -191,3 +191,36 @@ def test_strip_actions_no_asterisks_unchanged_aside_from_whitespace():
 
 def test_strip_actions_collapses_whitespace_left_behind():
     assert strip_actions("Hi   *pauses*   there") == "Hi there"
+
+
+def test_strip_emoji_removes_trailing_emoji():
+    assert strip_emoji("Hi there! \U0001f60a") == "Hi there!"
+
+
+def test_strip_emoji_removes_leading_emoji():
+    assert strip_emoji("\U0001f389 Congrats!") == "Congrats!"
+
+
+def test_strip_emoji_removes_emoji_mid_sentence():
+    assert strip_emoji("I'm so \U0001f60a happy right now") == "I'm so happy right now"
+
+
+def test_strip_emoji_all_emoji_collapses_to_empty():
+    assert strip_emoji("\U0001f60a") == ""
+
+
+def test_strip_emoji_removes_zwj_sequence():
+    # Family emoji, a ZWJ-joined sequence of four separate codepoints.
+    assert strip_emoji("Family time \U0001f468‍\U0001f469‍\U0001f467‍\U0001f466!") == "Family time !"
+
+
+def test_strip_emoji_removes_flag_emoji():
+    assert strip_emoji("\U0001f1fa\U0001f1f8 USA") == "USA"
+
+
+def test_strip_emoji_no_emoji_unchanged_aside_from_whitespace():
+    assert strip_emoji("Just a normal sentence.") == "Just a normal sentence."
+
+
+def test_strip_emoji_collapses_whitespace_left_behind():
+    assert strip_emoji("Hi   \U0001f60a   there") == "Hi there"

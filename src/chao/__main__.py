@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 
 from chao.brain.backend import CircuitBreakerBackend, LLMBackend
 from chao.brain.cloud import AnthropicBackend
-from chao.brain.local import OllamaBackend
+from chao.brain.local import OllamaBackend, load_ollama_config
 from chao.brain.turn import TurnOrchestrator
 from chao.bus import Bus
 from chao.dashboard.server import DASHBOARD_HOST, DASHBOARD_PORT, create_app
@@ -457,9 +457,14 @@ async def main() -> None:
     kill_switch_config = load_kill_switch_config(CHAO_CONFIG_PATH)
     twitch_config = load_twitch_config(CHAO_CONFIG_PATH)
     voice_config = load_voice_config(CHAO_CONFIG_PATH)
+    ollama_config = load_ollama_config(CHAO_CONFIG_PATH)
 
     cloud = AnthropicBackend()  # reads ANTHROPIC_API_KEY from the environment
-    local = OllamaBackend(os.environ.get("CHAO_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL))
+    local = OllamaBackend(
+        os.environ.get("CHAO_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL),
+        num_thread=ollama_config.num_thread,
+        think=ollama_config.think,
+    )
     backend = _select_backend(llm_backend_choice, cloud, local)
 
     bus, orchestrator = build_pipeline(

@@ -141,6 +141,7 @@ class Director:
     def _handle_sentence(self, sentence_text: str) -> str:
         cleaned, parsed_tags = tags_module.parse_tags(sentence_text)
         cleaned = tags_module.strip_actions(cleaned)
+        cleaned = tags_module.strip_emoji(cleaned)
         index = self._sentence_index
         self._sentence_index += 1
         for tag in parsed_tags:

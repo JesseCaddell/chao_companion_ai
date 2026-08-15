@@ -4,6 +4,206 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
+## Stopping point (session 11 part 1, 2026-08-14): Ollama CPU contention fix
+
+User's own live-testing since the last session (directed fly, part 16, is
+now confirmed working — "Chao follows directions and can fly where it
+wants," no further action needed) also surfaced a real, serious problem
+with `CHAO_LLM_BACKEND=local` (part 17): with VTS and OBS running
+alongside it, "chao won't talk and my VTS starts to lag" — user's own
+hypothesis was the machine can't handle OBS+VTS+the LLM together.
+
+**Investigated rather than guessed at, per `advisor`'s explicit push-back
+on an earlier, under-measured theory.** First pass (before consulting
+advisor) jumped straight to "thinking-mode + thread oversubscription,"
+based on session 5's old prompt-eval numbers. Advisor flagged that as
+three stacked inferences with zero real measurements, named two cheaper
+explanations that had been skipped (prompt eval on the *real* assembled
+system prompt, not session 5's tiny stand-in; `keep_alive` cold-reload
+gaps), and specified the one measurement that would separate all
+candidates: hit `/api/chat` directly with the real production prompt
+(via `assemble_prompt`/`config/identity.md`, not a proxy), `stream: true`,
+and read `load_duration`/`prompt_eval_duration`/`eval_duration` off the
+final chunk. Also corrected a wrong assumption before it became a wasted
+change: `OLLAMA_NUM_THREAD` as a machine env var does nothing without an
+Ollama *server* restart (session 5 already hit this exact trap for
+`OLLAMA_NUM_GPU`) — the real per-request lever is `options.num_thread` /
+`think` in the JSON payload, no server restart, no env var.
+
+**Real measurements, real system prompt (~421 tokens), warm model, via a
+throwaway diagnostic script (not committed) that imports and calls actual
+production code (`assemble_prompt`, `IDENTITY_PATH.read_text()`) rather
+than a stand-in:**
+
+| | VTS/OBS closed | VTS/OBS open |
+|---|---|---|
+| prompt eval | 0.35s (1316 tok/s) | 6.56s (72 tok/s) — **~19x slower** |
+| generation | 2.66s | 71.70s — **~27x slower** |
+| first content token | ~5s | **83.5s** |
+
+Prompt eval and generation slowed by roughly the same large factor —
+that rules out a prompt-handling-specific artifact (which would only
+have hit prompt eval) and points at raw CPU scheduling contention
+instead. Confirmed the lever: capping `num_thread=8` (of 24 logical, on
+this machine's 5900X 12C/24T) with VTS+OBS still open brought prompt eval
+back to 0.32-0.35s and generation back to the 3-4s range — matching idle
+baseline almost exactly, with no measured cost to Ollama's own
+throughput. Adding `think=false` on top (qwen3's default reasoning mode
+was burning nearly the entire generation budget on tokens that never
+reach `content` — confirmed `eval_count` dropping from ~170-250 to ~24
+once disabled) cut it further, to sub-3s total with content arriving
+almost immediately after prompt eval instead of bursting out at the very
+end.
+
+**One outlier, not chased further:** a later same-config rerun (num_thread=8,
+think=false) hit 21s instead of ~3-10s, with `eval_duration` alone at
+17s for just 21 tokens — but `load_duration` was 0.14s (warm, not a cold
+reload) and a live CPU sample of VTS/OBS/Razer taken immediately
+afterward showed only ~0.5-1.4 cores of combined background load, nothing
+alarming. A follow-up call moments later was fast again (0.81s total).
+Contention on this machine appears bursty rather than constant — the
+thread cap demonstrably prevents the catastrophic 84s case, but doesn't
+guarantee every single call lands at idle-baseline speed if something
+else spikes transiently. Not investigated past this point (diminishing
+returns; the fix already turns "sometimes unusable" into "consistently
+usable," which is what mattered).
+
+**Fixed, committed-ready:**
+- `brain/local.py`: `OllamaBackend` gains `num_thread: int | None`/
+  `think: bool | None` constructor params, included in the request
+  payload's `options`/`think` fields only when set (omitted entirely by
+  default, so existing call sites/tests are unaffected). New
+  `OllamaConfig`/`load_ollama_config` (same load/assemble split as every
+  other `*_config` in this project), defaults `num_thread=8`/`think=False`
+  — live-verified values, not placeholders. Full investigation writeup
+  lives in this file's module docstring, not just here.
+- `config/chao.yaml`: new `ollama:` block wiring the same two values,
+  with the measured before/after numbers in the comment so a future
+  reader doesn't have to rediscover why 8, specifically.
+- `__main__.py`: loads `OllamaConfig` via `CHAO_CONFIG_PATH`, passes
+  `num_thread`/`think` into the real `OllamaBackend` construction.
+- **A second, smaller fix flagged by advisor as worth doing regardless of
+  the above diagnosis:** part 17's pinned-local path bypasses
+  `CircuitBreakerBackend` (correctly — that's what stops a backend from
+  silently swapping mid-test), but that also removed the only thing that
+  would make a stall visible from outside. A 10-minute prompt eval and a
+  genuinely dead backend looked identical. `brain/turn.py`'s
+  `TurnOrchestrator` gains `stall_warning_s: float = 8.0` and a
+  `_warn_if_stalled` background task, started alongside the stream and
+  cancelled the moment the first chunk arrives (or in the `finally`
+  regardless): if no chunk shows up within `stall_warning_s`, publishes a
+  new `Kind.BRAIN_STALLED` event once and keeps waiting — no cancellation,
+  no fallback, just stops the silence from being ambiguous, exactly per
+  advisor's explicit scope ("don't re-add fallback and don't build a
+  timeout framework"). New additive `Kind` constant only — not a bus
+  contract or Event shape change.
+
+**9 new tests** (`test_brain_local.py`: payload inclusion/omission for
+`num_thread`/`think`, `load_ollama_config`'s three cases;
+`test_brain_turn.py`: `BRAIN_STALLED` fires before a delayed first chunk
+and carries the right `turn_id`/payload, does *not* fire for a normal-speed
+turn). Full suite: **326 passed**, ruff clean, format clean.
+
+**Live-verified against real Ollama, real VTS+OBS running, through the
+actual production `OllamaBackend`/`load_ollama_config` (not a
+reimplementation):** confirmed the config loads `num_thread=8`/`think=False`
+from `config/chao.yaml` and that a real call through it completes (numbers
+matched the throwaway-script figures above, same run-to-run variance noted
+there).
+
+**End-to-end live verification, session 11 part 2, same day:** ran the real
+app (`uv run python -m chao` equivalent, `.venv\Scripts\python.exe -m chao`)
+with `CHAO_LLM_BACKEND=local`, VTS+OBS already running. User: "getting
+started took a little bit of time, but then it worked just fine." Not
+measured this session, so not attributed to one specific cause — consistent
+with first-use lazy model init somewhere in the pipeline (Ollama's own
+`load_duration` cold load and/or `WhisperBackend`'s/`PiperBackend`'s lazy
+first-call load, all three genuinely lazy-loaded), not necessarily the
+per-request CPU-contention problem `num_thread`/`think` specifically
+address — those two are different costs. Didn't recur or block anything
+after the first exchange, so not chased further this session; if a future
+session wants the exact cause, the `advisor`-recommended move from part 1
+applies again here too — measure, don't infer. Confirmed genuinely talking to the
+Ollama model, not Claude: the response included an emoji, which the
+Anthropic-backend path doesn't produce in this pipeline — a real, if
+accidental, tell that the pinned local backend was actually in effect.
+User has since set `CHAO_LLM_BACKEND=local` in `.env` (not just this
+session's one-off env override), so this is now the standing default on
+this machine, not just a test run.
+
+Recommended-next-step is now closed — the fix is live-verified end-to-end,
+not just at the component level.
+
+**Scope note, worth keeping in view:** CLAUDE.md's own position is
+"cloud is the live default; local CPU for dev and reflection." An 8B
+model on CPU, even well-tuned, is unlikely to be a comfortable *live-
+streaming* backend on this box — the framing this session used, per
+advisor, was "make local usable for dev without wrecking the desktop,"
+not "make local live-viable." If local is ever wanted as a real fallback
+during a live stream (not just dev/testing), a smaller model (e.g.
+`qwen3:4b`) is the next lever to reach for, not further thread/think
+tuning on the 8B model.
+
+### Session 11, part 2: emoji leaking into TTS
+
+Found live, during the end-to-end check above: user spotted a real dashboard
+event, `output.speech_start {"sentence":"\U0001f60a",
+"duration_ms":2008.53...}` — a sentence that was *only* an emoji reached
+`Speaker.speak` and got a full ~2s TTS attempt at vocalizing it. Root cause:
+`director.py`'s `_handle_sentence` already had a deterministic backstop for
+one LLM-narration failure mode (`tags_module.strip_actions`, for
+`*asterisk-wrapped action text*`, landed session 8ish) but nothing
+equivalent for emoji — qwen3 (the now-default local backend, see part 1
+above) apparently reaches for emoji sometimes where Claude hasn't been
+observed to.
+
+**Fixed the same way `strip_actions` was**, not a new mechanism:
+`director/tags.py` gains `_EMOJI_PATTERN` (common pictograph/symbol/dingbat
+Unicode blocks, flag regional indicators, plus the ZWJ/variation-selector
+codepoints emoji sequences combine with — not an exhaustive Unicode emoji
+database, just enough for what a chat model actually emits) and
+`strip_emoji(text)`, called from `director.py`'s `_handle_sentence` right
+after `strip_actions`. An emoji-only sentence now collapses to `""`, which
+`Speaker.speak` already treats as nothing to say (`if not text: return`,
+pre-existing guard) — no code change needed on the TTS side, same
+"collapses to nothing to say" precedent `strip_actions` already
+established. Verified `Speaker.speak` (`turn.py:216`) is the *only* call
+site reachable from a turn (`grep -rn "\.speak(" src/`), and that both of
+`director.py`'s feed paths into it (`process_chunk` per-chunk and
+`end_turn`'s final flush) route through `_handle_sentence` — the strip
+covers the whole path, not just the common case.
+
+**Known gap, not fixed this pass:** `strip_emoji("\U0001f60a.")` →
+`"."` — non-empty, so `Speaker.speak`'s `if not text` guard won't catch a
+sentence that was emoji plus trailing punctuation, and TTS would still get
+a call for a lone `.`. Narrow in practice (the sentence splitter fragments
+*after* punctuation, so an emoji ending up alone with trailing punctuation
+on its own fragment is uncommon) and not what the user's report showed, but
+it's the same failure class — noted rather than silently assumed away.
+Would need `Speaker.speak`'s emptiness check to become "no remaining word
+characters" rather than "empty" to close fully; not done here since it
+touches `Speaker.speak` itself, wasn't the reported bug, and needs a
+decision about whether that check should broaden generally.
+
+**8 new tests** in `test_director_tags.py`, mirroring `strip_actions`'
+existing test shape one-for-one (leading/trailing/mid-sentence emoji,
+all-emoji collapse, ZWJ sequence, flag emoji, no-emoji-unchanged,
+whitespace-collapse-after-strip). Full suite: **334 passed**, ruff clean,
+format clean. Not yet re-verified live against a real Ollama emoji
+response (the fix is a pure-function deterministic strip, same low-risk
+category as `strip_actions`, which also wasn't separately live-re-verified
+after landing) — flagged here rather than silently assumed.
+
+**Also considered, not done, flagged for the user rather than acted on
+unilaterally:** `strip_actions`' own docstring calls itself "the
+deterministic backstop" for an instruction that lives in `identity.md` —
+there's no equivalent no-emoji instruction there, so emoji currently has
+only the code-side backstop and no prompt-level discouragement. Worth doing
+given the local (CPU-bound) backend burns real generation budget on emoji
+tokens that never reach spoken output — but `identity.md` edits are a
+CLAUDE.md escalate-before-changing item (the trait sheet), so this is a
+question for the user, not a change made without asking.
+
 ## Stopping point (session 10 part 5, 2026-08-13, live-verified)
 
 §8.1 envelope-driven motion, picked back up after the previous session was

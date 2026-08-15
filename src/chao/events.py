@@ -44,6 +44,7 @@ class Kind:
     BRAIN_REQUEST = "brain.request"
     BRAIN_TOKEN = "brain.token"
     BRAIN_COMPLETE = "brain.complete"
+    BRAIN_STALLED = "brain.stalled"
 
     DIRECTOR_TAG = "director.tag"
     DIRECTOR_EMOTE = "director.emote"

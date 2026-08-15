@@ -86,6 +86,48 @@ async def test_publishes_brain_complete_with_full_text_and_latency():
     assert complete.payload["usage"] is None
 
 
+class SlowStartBackend:
+    """First chunk arrives only after `delay_s` -- simulates a stalled
+    first-token wait (e.g. Ollama under real CPU contention) without a real
+    sleep longer than a test should take.
+    """
+
+    def __init__(self, chunks, delay_s: float) -> None:
+        self.chunks = list(chunks)
+        self.delay_s = delay_s
+
+    async def stream(self, system, messages, cancel):
+        await asyncio.sleep(self.delay_s)
+        for c in self.chunks:
+            yield c
+
+
+async def test_publishes_brain_stalled_when_first_chunk_is_slow():
+    backend = SlowStartBackend(["Hi."], delay_s=0.02)
+    orchestrator, events = make_orchestrator(backend)
+    orchestrator.stall_warning_s = 0.01
+
+    await orchestrator(make_input_event("Hi"), asyncio.Event(), "t1")
+
+    stalled = next(e for e in events if e.kind == Kind.BRAIN_STALLED)
+    assert stalled.turn_id == "t1"
+    assert stalled.payload["waited_s"] == 0.01
+    # Fired before the (delayed) first token, not after.
+    assert events.index(stalled) < events.index(
+        next(e for e in events if e.kind == Kind.BRAIN_TOKEN)
+    )
+
+
+async def test_does_not_publish_brain_stalled_when_first_chunk_is_fast():
+    backend = FakeBackend(["Hi."])
+    orchestrator, events = make_orchestrator(backend)
+    orchestrator.stall_warning_s = 5.0
+
+    await orchestrator(make_input_event("Hi"), asyncio.Event(), "t1")
+
+    assert not any(e.kind == Kind.BRAIN_STALLED for e in events)
+
+
 async def test_emote_fires_via_director_during_turn():
     backend = FakeBackend(["[happy] Hi there! "])
     orchestrator, events = make_orchestrator(backend)

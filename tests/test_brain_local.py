@@ -1,8 +1,9 @@
 import asyncio
 import json
+from pathlib import Path
 
 from chao.brain.backend import Message
-from chao.brain.local import OllamaBackend
+from chao.brain.local import OllamaBackend, OllamaConfig, load_ollama_config
 
 
 class FakeResponse:
@@ -91,3 +92,53 @@ async def test_skips_blank_lines():
     result = [chunk async for chunk in backend.stream("sys", [], asyncio.Event())]
 
     assert result == ["only"]
+
+
+async def test_omits_num_thread_and_think_when_not_configured():
+    lines = [ndjson_line("hi", done=True)]
+    client = FakeHTTPClient(FakeResponse(lines))
+    backend = OllamaBackend("test-model", client=client)
+
+    async for _ in backend.stream("sys", [], asyncio.Event()):
+        pass
+
+    payload = client.calls[0][2]["json"]
+    assert "options" not in payload
+    assert "think" not in payload
+
+
+async def test_includes_num_thread_and_think_when_configured():
+    lines = [ndjson_line("hi", done=True)]
+    client = FakeHTTPClient(FakeResponse(lines))
+    backend = OllamaBackend("test-model", client=client, num_thread=8, think=False)
+
+    async for _ in backend.stream("sys", [], asyncio.Event()):
+        pass
+
+    payload = client.calls[0][2]["json"]
+    assert payload["options"] == {"num_thread": 8}
+    assert payload["think"] is False
+
+
+# --- load_ollama_config ------------------------------------------------------
+
+
+def test_load_ollama_config_reads_the_ollama_block(tmp_path: Path):
+    config_path = tmp_path / "chao.yaml"
+    config_path.write_text("ollama:\n  num_thread: 4\n  think: true\n")
+
+    config = load_ollama_config(config_path)
+
+    assert config.num_thread == 4
+    assert config.think is True
+
+
+def test_load_ollama_config_defaults_when_file_missing(tmp_path: Path):
+    assert load_ollama_config(tmp_path / "does_not_exist.yaml") == OllamaConfig()
+
+
+def test_load_ollama_config_defaults_when_block_absent(tmp_path: Path):
+    config_path = tmp_path / "chao.yaml"
+    config_path.write_text("tts:\n  voice_path: foo.onnx\n")
+
+    assert load_ollama_config(config_path) == OllamaConfig()
