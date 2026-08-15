@@ -38,6 +38,9 @@ from chao.director.idle_drift import IdleDrift, IdleDriftConfig, load_idle_drift
 from chao.director.mood import Mood, MoodConfig, load_mood_config
 from chao.director.motion import MotionConfig, load_motion_config
 from chao.events import Event, Kind
+from chao.inputs.free_speech import MIN_INTERVAL_S as FREE_SPEECH_MIN_INTERVAL_S
+from chao.inputs.free_speech import PROMPT_TEXT as FREE_SPEECH_PROMPT_TEXT
+from chao.inputs.free_speech import FreeSpeech
 from chao.inputs.killswitch import KillSwitch, load_kill_switch_config
 from chao.inputs.twitch import TwitchChatClient, TwitchConfig, load_twitch_config
 from chao.inputs.voice import VoiceConfig, VoiceInput, load_voice_config
@@ -131,14 +134,22 @@ async def _print_errors(sub: asyncio.Queue[Event]) -> None:
             print(f"  !! error: {event.payload.get('message')}")
 
 
-async def _run_dashboard_server(bus: Bus) -> None:
+async def _run_dashboard_server(
+    bus: Bus,
+    *,
+    set_backend: Callable[[str], None] | None = None,
+    set_free_speech: Callable[[bool, float], None] | None = None,
+) -> None:
     """Runs uvicorn in-process (not `uvicorn.run`, which calls `asyncio.run`
     and would fight the loop `main()` already owns) since the dashboard's
     websocket subscribes to the same in-memory `Bus` the rest of the app
     uses — it isn't a separate process or network service.
     """
     config = uvicorn.Config(
-        create_app(bus), host=DASHBOARD_HOST, port=DASHBOARD_PORT, log_level="warning"
+        create_app(bus, set_backend=set_backend, set_free_speech=set_free_speech),
+        host=DASHBOARD_HOST,
+        port=DASHBOARD_PORT,
+        log_level="warning",
     )
     server = uvicorn.Server(config)
     await server.serve()
@@ -426,6 +437,36 @@ async def _run_voice(bus: Bus, voice_config: VoiceConfig) -> None:
         watch_task.cancel()
 
 
+async def _run_speech_cooldown_tracker(bus: Bus) -> None:
+    """Session 11 finding: `Bus.mark_speech_end` existed and was fully
+    tested (test_bus.py calls it directly) but nothing in the running app
+    ever called it -- the 15s post-speech cooldown has never actually been
+    active. Small standalone subscriber, always running (not gated on
+    voice/twitch/anything else being enabled), same shape as `_run_voice`'s
+    `watch_speech_state` loop.
+    """
+    sub = bus.subscribe()
+    while True:
+        event = await sub.get()
+        if event.kind == Kind.OUTPUT_SPEECH_END:
+            bus.mark_speech_end(event.ts)
+
+
+async def _run_free_speech(bus: Bus, free_speech: FreeSpeech) -> None:
+    """Session 11: polls `FreeSpeech.tick()` at 1Hz and publishes
+    `input.ambient` when it fires -- the lowest-priority arbitrated input
+    (see bus.py), so it never preempts a real conversation and is itself
+    gated by the same speech cooldown `_run_speech_cooldown_tracker` wires
+    up. `free_speech.enabled`/`interval_s` are mutated live by the
+    dashboard's command channel (dashboard/server.py); this loop just
+    reads whatever the current values are on each tick.
+    """
+    while True:
+        await asyncio.sleep(1.0)
+        if free_speech.tick():
+            bus.publish(Event(kind=Kind.INPUT_AMBIENT, payload={"text": FREE_SPEECH_PROMPT_TEXT}))
+
+
 async def _read_stdin_into_bus(bus: Bus) -> None:
     loop = asyncio.get_running_loop()
     while True:
@@ -473,6 +514,25 @@ async def main() -> None:
     speaker = _build_speaker(tts_config, motion_config, bus.publish)
     orchestrator.speaker = speaker
 
+    # Session 11: dashboard-driven backend toggle. Reassigning
+    # orchestrator.backend is safe mid-turn -- TurnOrchestrator.__call__
+    # reads self.backend exactly once, at the `async for chunk in
+    # self.backend.stream(...)` line, which binds to whatever backend
+    # instance was current at that moment; a later reassignment only
+    # affects the *next* turn, never a generator already in flight.
+    def _set_backend(choice: str) -> None:
+        orchestrator.backend = _select_backend(choice, cloud, local)
+
+    # Session 11: free speech. Starts disabled, config default only (never
+    # persisted to disk) -- an autonomous-speech feature that survives a
+    # restart and starts talking unprompted is a surprise, not a
+    # convenience, per the user's own explicit call.
+    free_speech = FreeSpeech()
+
+    def _set_free_speech(enabled: bool, interval_s: float) -> None:
+        free_speech.enabled = enabled
+        free_speech.interval_s = max(interval_s, FREE_SPEECH_MIN_INTERVAL_S)
+
     # Started before any input source (stdin, later Twitch) so the kill
     # switch is live from the first possible moment, not an afterthought
     # wired in after other tasks. start() must run inside the loop it's
@@ -482,7 +542,9 @@ async def main() -> None:
     kill_switch.start()
 
     error_task = asyncio.create_task(_print_errors(bus.subscribe()))
-    dashboard_task = asyncio.create_task(_run_dashboard_server(bus))
+    dashboard_task = asyncio.create_task(
+        _run_dashboard_server(bus, set_backend=_set_backend, set_free_speech=_set_free_speech)
+    )
     vts_task = asyncio.create_task(
         _run_vts_subscriber(
             bus, emote_config, fly_config, speaker, motion_config, idle_drift_config
@@ -493,6 +555,8 @@ async def main() -> None:
     fly_task = asyncio.create_task(_run_fly(bus, fly_config))
     twitch_task = asyncio.create_task(_run_twitch(bus, twitch_config))
     voice_task = asyncio.create_task(_run_voice(bus, voice_config))
+    speech_cooldown_task = asyncio.create_task(_run_speech_cooldown_tracker(bus))
+    free_speech_task = asyncio.create_task(_run_free_speech(bus, free_speech))
     run_task = asyncio.create_task(bus.run(orchestrator))
 
     print(
@@ -521,6 +585,8 @@ async def main() -> None:
         fly_task.cancel()
         twitch_task.cancel()
         voice_task.cancel()
+        speech_cooldown_task.cancel()
+        free_speech_task.cancel()
         await asyncio.gather(
             run_task,
             error_task,
@@ -531,6 +597,8 @@ async def main() -> None:
             fly_task,
             twitch_task,
             voice_task,
+            speech_cooldown_task,
+            free_speech_task,
             return_exceptions=True,
         )
 

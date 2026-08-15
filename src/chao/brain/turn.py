@@ -32,6 +32,7 @@ _SOURCE_BY_KIND: dict[str, EventSource] = {
     Kind.INPUT_CHAT: "chat",
     Kind.INPUT_VOICE: "voice",
     Kind.INPUT_MANUAL: "manual",
+    Kind.INPUT_AMBIENT: "ambient",
 }
 
 

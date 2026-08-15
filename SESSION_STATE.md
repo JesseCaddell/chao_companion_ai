@@ -4,6 +4,141 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
+## Stopping point (session 11 part 5, 2026-08-14): dashboard command channel, backend toggle, free speech
+
+User asked for two dashboard features: a live toggle between the local and
+cloud LLM backends, and a "free speech" mode letting chao talk without
+being talked to. Scoped through several rounds of design questions before
+any code, per this session's established discipline for anything touching
+arbitration:
+
+- **Pricing check (via the `claude-api` skill, not memory):** the cloud
+  backend defaults to Claude Haiku 4.5 ($1/$5 per 1M tokens). At ~1000
+  input + ~100 output tokens per short spontaneous turn, ~60 turns/hour
+  costs roughly $0.09-0.14/hr — cheap enough not to gate the feature on.
+- **User's calls, gathered via AskUserQuestion before writing code:** same
+  free-speech interval regardless of backend, but adjustable live from the
+  dashboard (not just a static config value); the toggle starts off on
+  every restart, never persisted to disk — an autonomous-speech feature
+  that survives a restart and starts talking unprompted on its own would
+  be a surprise, not a convenience.
+- **`advisor` caught two things before code:** (1) `TURN_TRIGGERING_KINDS`
+  is a real bus-contract change (CLAUDE.md's explicit escalation trigger),
+  but turned out to be finishing a decision already made, not making a new
+  one — `prompt.py`'s `EventSource` already had `"ambient"` as a valid,
+  *trusted* source with nothing wired to produce it, and `bus.py`'s "not
+  arbitrated" reasoning was specifically about §10.4's non-verbal,
+  zero-token reactions, a case free speech (verbal, real cost) isn't. Still
+  needed a new lowest `Priority.AMBIENT` tier rather than reusing
+  `CHAT_BACKGROUND`'s tier or `MANUAL` (verified `MANUAL=5` outranks
+  `VOICE` and is cooldown-exempt — reusing it would let free speech
+  preempt the streamer mid-sentence). (2) **Found a real, previously-dead
+  bug while checking the cooldown path:** `Bus.mark_speech_end` existed,
+  was fully unit-tested (`test_bus.py` calls it directly), but nothing in
+  the actual running app ever called it — the 15s post-speech cooldown has
+  never once been active in a live run. Fixed as a prerequisite, not a
+  side note, since free speech's safety (not chattering immediately after
+  finishing a reply) depends on it.
+
+**Built, in the order `advisor` specified (channel, then toggle, then
+free speech, since free speech needed the arbitration change):**
+
+- **`bus.py`**: new `Priority.AMBIENT = 0` (below `CHAT_BACKGROUND`),
+  `Kind.INPUT_AMBIENT` added to `TURN_TRIGGERING_KINDS`, `priority_of`
+  maps it to the new tier. Module docstring corrected to explain why this
+  doesn't contradict its own prior "ambient events are deliberately not
+  arbitrated" claim (different case: non-verbal zero-cost reactions vs. a
+  real spoken turn). `turn.py`'s `_SOURCE_BY_KIND` gains the mapping to
+  `"ambient"` (already a trusted `EventSource`, per `prompt.py`'s existing
+  `_UNTRUSTED_SOURCES` exclusion — chat is the only untrusted source).
+- **`inputs/free_speech.py`** (new): `FreeSpeech`, a plain interval timer
+  (deliberately not tied to mood/boredom, per the user's own "same
+  interval, adjustable live" framing) — same clock-injectable dataclass
+  shape as `Fly`/`IdleDrift`. `enabled`/`interval_s` are ordinary mutable
+  fields, meant to be the same object the dashboard's command channel
+  mutates and `__main__.py`'s 1Hz polling task reads. Disabled clock is
+  pinned to "now" rather than left to accumulate, so re-enabling after a
+  long stretch off doesn't fire immediately (a real edge case, caught by
+  writing the test for it, not by inspection). `MIN_INTERVAL_S = 15.0`
+  enforced at the command-handling boundary (policy), not in the class
+  itself (mechanism).
+- **`dashboard/server.py`**: `/ws/events` is now bidirectional — a
+  `relay()` loop (unchanged behavior) and a new `receive_commands()` loop
+  run concurrently via `asyncio.wait(..., FIRST_COMPLETED)` on the same
+  socket. `create_app` takes optional `set_backend`/`set_free_speech`
+  callables, defaulting to `None` (commands silently ignored, same
+  degrade-gracefully shape as everything else optional in this pipeline;
+  every pre-existing `create_app(bus)` call site is unaffected).
+  `_handle_command` is a tolerant parser matching `tags.py`'s precedent —
+  a malformed or unrecognized client message never crashes the socket.
+- **`__main__.py`**: `_set_backend` reassigns `orchestrator.backend` —
+  confirmed safe mid-turn by reading `turn.py` closely first, not
+  assuming: `self.backend` is read exactly once, at
+  `self.backend.stream(...)`, which binds to whatever instance was
+  current at that moment; a later reassignment only affects the *next*
+  turn. `_run_speech_cooldown_tracker` (new) is the fix for the dead
+  `mark_speech_end` bug above. `_run_free_speech` (new) polls
+  `FreeSpeech.tick()` at 1Hz and publishes `input.ambient` with a fixed
+  prompt text explaining to the model that nothing prompted this turn.
+- **Frontend (`App.tsx`/`index.css`)**: a `.controls` row under the
+  header — a backend `<select>` (auto/cloud/local) and a free-speech
+  checkbox + interval number input, sending `{type: "set_backend", ...}`
+  / `{type: "set_free_speech", ...}` over the existing websocket.
+  Optimistic local state only, no confirmation round trip — `brain.
+  request`'s existing `"backend"` field in the feed is the real
+  confirmation of what served the last turn.
+
+**15 new tests** (`test_inputs_free_speech.py` ×7, `test_bus.py` ×3 net
+new — one old test, `test_ambient_bypasses_arbitration_entirely`, was
+rewritten rather than kept, since it pinned exactly the behavior this
+session inverted — `test_dashboard_server.py` ×6). Full suite: **352
+passed**, ruff clean, format clean, frontend `npm run build`/`lint` clean.
+
+**Live-verified end-to-end, real app, real VTS, real Anthropic + Ollama,
+through the actual dashboard UI (Chrome automation) — not a synthetic
+script this time, the real running process:**
+- Set free speech to 15s (the floor) and watched real spontaneous turns
+  fire: `input.ambient` → `decision.selected priority: 0` → a real varied
+  reply, repeatedly, unprompted. Watched the cooldown genuinely catch a
+  real overlap (`decision.dropped reason: cooldown` right next to an
+  `input.ambient` that arrived while a prior turn was still finishing) —
+  the dead-bug fix confirmed working, not just unit-tested.
+- Switched the backend dropdown to "cloud" mid-session (after two failed
+  coordinate-click attempts on the native `<select>` — Chrome automation's
+  `computer` tool doesn't reliably hit native dropdown options; the
+  `find`/`form_input` tools worked on the first try) and confirmed the
+  very next spontaneous turn's `brain.request` showed `"backend":
+  "AnthropicBackend"` instead of `"OllamaBackend"` — a real live mid-run
+  switch, no disruption to the in-flight pipeline.
+- The rest of the session's redesigned pipeline (emote cooldown removal,
+  Fly's probabilistic launch/boredom paths) rode along correctly under
+  free speech too — `director.emote` firing normally per tag, `state.fly`
+  showing both `reposition` and `arousal_high` triggers in the same
+  window, nothing suppressed or broken by the new lowest-priority input
+  source.
+
+**Real, live-caught side finding: emoji were still reaching TTS from the
+local backend specifically**, despite the prompt-only fix from earlier
+this session (part 3's `identity.md` no-emoji line, code-side strip
+deliberately removed by the user's own choice). Checked the transcript:
+every emoji instance (🌈, 🌍✨, 🐾, 🌌) came from `OllamaBackend` turns; the
+one turn served by `AnthropicBackend` during the live backend-toggle test
+had none. **User's fix, not mine — explicitly declined re-adding the code
+strip** ("because of the period afterwards" — the known gap where
+`strip_emoji("😊.")` → `"."`, still non-empty, still reaches TTS) **and
+explicitly declined any backend-specific handling** ("I'd like to avoid
+backend restrictions like that if possible"). Instead: moved the no-emoji
+line from the end of the Temperament paragraph to its very first sentence
+— the earliest instruction the model reads, no backend branching, pure
+prompt-position fix. **Live-verified afterward, real restart, real free
+speech mode, user's own words: "we are getting no emojis. Very nice."**
+No test depends on identity.md's exact wording; full suite unaffected
+(352 passed both before and after).
+
+Committed together — channel, toggle, free speech, and the emoji
+reposition fix all landed and were live-verified the same session, no
+reason to split.
+
 ## Stopping point (session 11 part 4, 2026-08-14): dashboard feed swamped by vts.param, plus a real conversation
 
 User had a real conversation with chao (voice + the part 3 emote/fly changes

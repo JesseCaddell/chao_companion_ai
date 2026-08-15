@@ -73,6 +73,40 @@ body {
   color: var(--error);
 }
 
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  margin-top: 10px;
+  font-size: 12px;
+}
+
+.control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.control select {
+  font: inherit;
+  background: var(--bg-alt);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 4px;
+}
+
+.interval {
+  font: inherit;
+  background: var(--bg-alt);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  width: 4.5em;
+  padding: 2px 4px;
+}
+
 .params {
   display: flex;
   flex-wrap: wrap;

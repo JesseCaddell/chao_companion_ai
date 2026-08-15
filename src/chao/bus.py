@@ -2,19 +2,26 @@
 
 Two lanes, deliberately unequal:
 
-- **Arbitrated turns.** `input.chat`, `input.voice`, `input.manual` compete
-  for a single in-flight brain call. A strictly higher-priority arrival
-  preempts the current turn by setting its cancel token; anything else is
-  dropped with a `decision.dropped` event and a reason. This is the
-  exclusive, cancellable, cooldown-gated path (CLAUDE.md invariant 5).
-- **Everything else** — `input.ambient`, `director.*`, `output.*`,
-  `vts.param`, `state.fly`, and the `decision.*`/`brain.*` events a turn
-  itself produces — is fanned out to subscribers immediately, unblocked.
-  Ambient events are deliberately *not* arbitrated: design doc §10.4 wants
-  roughly 10 non-verbal reactions per spoken response, running continuously
-  regardless of whatever the brain is doing. If a future ambient trigger
-  needs to escalate to a full spoken turn, that's a phase 3+ decision, not
-  one to speculatively build now.
+- **Arbitrated turns.** `input.chat`, `input.voice`, `input.manual`,
+  `input.ambient` compete for a single in-flight brain call. A strictly
+  higher-priority arrival preempts the current turn by setting its cancel
+  token; anything else is dropped with a `decision.dropped` event and a
+  reason. This is the exclusive, cancellable, cooldown-gated path
+  (CLAUDE.md invariant 5).
+- **Everything else** — `director.*`, `output.*`, `vts.param`,
+  `state.fly`, and the `decision.*`/`brain.*` events a turn itself
+  produces — is fanned out to subscribers immediately, unblocked.
+
+**Update (session 11):** `input.ambient` moved from the second lane into
+the first — it now competes for a turn, at the new lowest tier
+(`Priority.AMBIENT`), as the trigger for "free speech" (an unprompted,
+spontaneous spoken turn; see `inputs/free_speech.py`). This does not
+contradict the original "ambient events are deliberately not arbitrated"
+reasoning below it superseded: that reasoning was about §10.4's
+non-verbal, zero-token reactions (still true, still unarbitrated — those
+never published `input.ambient` in the first place, `aliveness.py`
+publishes `director.emote` directly). A spontaneous *spoken* turn is a
+different, real-cost case that reasoning never covered.
 
 The bus does not import brain/director/outputs. `run()` takes a
 `turn_handler` callback so it stays testable with fakes.
@@ -39,6 +46,13 @@ class Priority(IntEnum):
     maps to the top of this scale).
     """
 
+    # Session 11: free speech (§4.1 has no tier for this -- a spontaneous,
+    # unprompted turn is a new category, not a chat tier). Deliberately the
+    # only priority below CHAT_BACKGROUND: it must lose arbitration to
+    # literally anything else a real person did, and the 15s speech
+    # cooldown (mark_speech_end -- see _arbitrate below) keeps it from
+    # firing back-to-back with itself once selected.
+    AMBIENT = 0
     CHAT_BACKGROUND = 1  # §4.1 priority 4-5: velocity spike / background
     CHAT_ENGAGEMENT = 2  # §4.1 priority 3: high-affinity viewer
     CHAT_DIRECT = 3  # §4.1 priority 1-2: mention or question
@@ -57,8 +71,15 @@ _CHAT_PRIORITY_MAP: dict[int, Priority] = {
     5: Priority.CHAT_BACKGROUND,
 }
 
-# Only these kinds compete for the single in-flight turn.
-TURN_TRIGGERING_KINDS = frozenset({Kind.INPUT_CHAT, Kind.INPUT_VOICE, Kind.INPUT_MANUAL})
+# Only these kinds compete for the single in-flight turn. input.ambient
+# joined this set in session 11 (free speech) -- the module docstring's
+# older "ambient events are deliberately not arbitrated" was written for
+# §10.4's non-verbal, zero-token reactions specifically; a spontaneous
+# *spoken* turn is a different case that docstring never contemplated, and
+# it needs the same single-in-flight-turn exclusivity as any other input.
+TURN_TRIGGERING_KINDS = frozenset(
+    {Kind.INPUT_CHAT, Kind.INPUT_VOICE, Kind.INPUT_MANUAL, Kind.INPUT_AMBIENT}
+)
 
 TurnHandler = Callable[[Event, asyncio.Event, str], Awaitable[None]]
 
@@ -133,6 +154,8 @@ class Bus:
         if event.kind == Kind.INPUT_CHAT:
             scored = event.payload.get("priority", 5)
             return _CHAT_PRIORITY_MAP.get(scored, Priority.CHAT_BACKGROUND)
+        if event.kind == Kind.INPUT_AMBIENT:
+            return Priority.AMBIENT
         return Priority.CHAT_BACKGROUND
 
     def mark_speech_end(self, ts: float) -> None:

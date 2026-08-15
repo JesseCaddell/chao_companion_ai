@@ -1,3 +1,5 @@
+import time
+
 from fastapi.testclient import TestClient
 
 from chao.bus import Bus
@@ -83,3 +85,83 @@ def test_subtitles_route_relays_speech_start_over_the_same_ws():
 
     assert received["kind"] == Kind.OUTPUT_SPEECH_START
     assert received["payload"]["sentence"] == "Hello!"
+
+
+def test_set_backend_command_calls_the_setter():
+    calls: list[str] = []
+    bus = Bus()
+    client = TestClient(create_app(bus, set_backend=calls.append))
+
+    with client.websocket_connect("/ws/events") as websocket:
+        websocket.send_json({"type": "set_backend", "backend": "cloud"})
+        time.sleep(0.05)
+
+    assert calls == ["cloud"]
+
+
+def test_set_backend_ignores_unrecognized_backend_value():
+    calls: list[str] = []
+    bus = Bus()
+    client = TestClient(create_app(bus, set_backend=calls.append))
+
+    with client.websocket_connect("/ws/events") as websocket:
+        websocket.send_json({"type": "set_backend", "backend": "gpt5"})
+        time.sleep(0.05)
+
+    assert calls == []
+
+
+def test_set_free_speech_command_calls_the_setter():
+    calls: list[tuple[bool, float]] = []
+    bus = Bus()
+    client = TestClient(create_app(bus, set_free_speech=lambda e, i: calls.append((e, i))))
+
+    with client.websocket_connect("/ws/events") as websocket:
+        websocket.send_json({"type": "set_free_speech", "enabled": True, "interval_s": 45})
+        time.sleep(0.05)
+
+    assert calls == [(True, 45.0)]
+
+
+def test_malformed_free_speech_interval_does_not_crash_or_call_setter():
+    calls: list[tuple[bool, float]] = []
+    bus = Bus()
+    client = TestClient(create_app(bus, set_free_speech=lambda e, i: calls.append((e, i))))
+
+    with client.websocket_connect("/ws/events") as websocket:
+        websocket.send_json({"type": "set_free_speech", "enabled": True, "interval_s": "soon"})
+        # Connection must still be alive -- a real event still relays.
+        bus.publish(Event(kind=Kind.DIRECTOR_TAG, payload={"tag": "happy"}))
+        received = websocket.receive_json()
+
+    assert calls == []
+    assert received["kind"] == Kind.DIRECTOR_TAG
+
+
+def test_commands_are_ignored_when_no_setter_was_provided():
+    """create_app(bus) with no setters (every pre-session-11 call site)
+    must not crash on an incoming command -- it just has nothing to do.
+    """
+    bus = Bus()
+    client = TestClient(create_app(bus))
+
+    with client.websocket_connect("/ws/events") as websocket:
+        websocket.send_json({"type": "set_backend", "backend": "cloud"})
+        bus.publish(Event(kind=Kind.DIRECTOR_TAG, payload={"tag": "happy"}))
+        received = websocket.receive_json()
+
+    assert received["kind"] == Kind.DIRECTOR_TAG
+
+
+def test_unrecognized_command_type_is_ignored():
+    calls: list[str] = []
+    bus = Bus()
+    client = TestClient(create_app(bus, set_backend=calls.append))
+
+    with client.websocket_connect("/ws/events") as websocket:
+        websocket.send_json({"type": "something_else"})
+        bus.publish(Event(kind=Kind.DIRECTOR_TAG, payload={"tag": "happy"}))
+        received = websocket.receive_json()
+
+    assert calls == []
+    assert received["kind"] == Kind.DIRECTOR_TAG

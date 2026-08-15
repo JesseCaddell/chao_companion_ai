@@ -39,20 +39,73 @@ def bus() -> Bus:
     return Bus(speech_cooldown_s=15.0)
 
 
-async def test_ambient_bypasses_arbitration_entirely(bus: Bus):
+async def test_ambient_triggers_a_turn_at_the_lowest_priority(bus: Bus):
+    """Session 11: input.ambient (free speech) now competes for a turn like
+    any other input -- superseding the old "ambient never arbitrates"
+    behavior, which was about §10.4's non-verbal reactions specifically
+    (see bus.py's module docstring). Confirmed here by checking it wins an
+    otherwise-empty slot, not just that a handler ran.
+    """
     sub = bus.subscribe()
-    called = False
+    ran = asyncio.Event()
 
     async def handler(event, cancel, turn_id):
-        nonlocal called
-        called = True
+        ran.set()
 
-    bus.publish(Event(kind=Kind.INPUT_AMBIENT, payload={"source": "timer"}))
+    task = asyncio.create_task(bus.run(handler))
+    bus.publish(Event(kind=Kind.INPUT_AMBIENT, payload={"text": "..."}))
+    await asyncio.wait_for(ran.wait(), timeout=1.0)
+    await stop(task)
+
+    seen = [e.kind for e in await drain(sub)]
+    assert Kind.INPUT_AMBIENT in seen
+    assert Kind.DECISION_SELECTED in seen
+
+
+async def test_ambient_loses_to_every_arbitrated_priority(bus: Bus):
+    """AMBIENT must be the true floor -- even CHAT_ENGAGEMENT (priority 3,
+    the lowest chat tier that actually enters arbitration at all --
+    CHAT_BACKGROUND itself is fanned-out-only, same as ambient used to be)
+    must win an in-flight slot over it.
+    """
+    cancelled = asyncio.Event()
+
+    async def handler(event, cancel, turn_id):
+        if event.kind == Kind.INPUT_AMBIENT:
+            await cancel.wait()
+            cancelled.set()
+        else:
+            await asyncio.sleep(10)
+
+    task = asyncio.create_task(bus.run(handler))
+    bus.publish(Event(kind=Kind.INPUT_AMBIENT, payload={"text": "..."}))
     await asyncio.sleep(0)
 
-    assert not called
-    seen = [e.kind for e in await drain(sub)]
-    assert seen == [Kind.INPUT_AMBIENT]
+    bus.publish(make_chat(priority=3))  # CHAT_ENGAGEMENT -- still outranks AMBIENT
+    await asyncio.wait_for(cancelled.wait(), timeout=1.0)
+
+    await stop(task)
+
+
+async def test_ambient_respects_the_speech_cooldown(bus: Bus):
+    """The same cooldown that gates a low-priority chat reply must gate a
+    free-speech turn too, or chao would chatter again immediately after
+    finishing a reply.
+    """
+    sub = bus.subscribe()
+
+    async def handler(event, cancel, turn_id):
+        return
+
+    task = asyncio.create_task(bus.run(handler))
+    bus.mark_speech_end(0.0)
+
+    bus.publish(Event(kind=Kind.INPUT_AMBIENT, payload={"text": "..."}, ts=1.0))
+    await asyncio.sleep(0)
+
+    await stop(task)
+    dropped = [e for e in await drain(sub) if e.kind == Kind.DECISION_DROPPED]
+    assert any(e.payload["reason"] == "cooldown" for e in dropped)
 
 
 async def test_single_manual_turn_runs(bus: Bus):
