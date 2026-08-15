@@ -61,6 +61,24 @@ fly:
   land_duration_s: 1.5      # shorter glide back to resting X when landing
   min_reposition_s: 8.0     # minimum gap between horizontal repositions while flying
 
+  # Session 11: "adventurous or bored or any feeling" redesign -- flying is
+  # no longer a guaranteed consequence of crossing on_above. See
+  # aliveness.py's Fly docstring for the full reasoning; tuning placeholders
+  # below, not yet live-verified by ear.
+  launch_probability: 0.35   # chance to actually launch on crossing on_above (edge-triggered,
+                              # one roll per crossing -- see Fly docstring). 1.0 = old always-
+                              # launch behavior; this is what makes flying occasional again.
+  boredom_below: 0.35        # a second, independent launch path -- arousal sitting near/at
+  boredom_dwell_s: 45.0      # baseline (not agitated, not sad) for this long makes the chao
+  boredom_probability: 0.05  # eligible, then this rolls on every mood tick while eligible
+                              # (~1Hz per mood.py's tick_interval_s) -- expected ~20s after
+                              # eligibility, so roughly a minute of genuine calm before takeoff.
+                              # MUST stay above mood.baseline_arousal (0.3 below) -- decay only
+                              # moves arousal TOWARD baseline, never past it during genuine calm,
+                              # so a boredom_below at or under baseline is unreachable except in
+                              # the brief post-[sad]-tag decay window, which §6.4's hard landing
+                              # rule already owns. advisor caught this before it shipped wrong.
+
 heart_gate:
   affinity_threshold: 0.4
   valence_threshold: 0.5

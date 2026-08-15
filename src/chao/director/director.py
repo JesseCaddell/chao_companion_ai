@@ -162,21 +162,30 @@ class Director:
             self._fire_pool(pool_name, tag)
 
     def _fire_pool(self, pool_name: str, tag: ParsedTag) -> None:
-        """One pool's worth of cooldown-gated firing -- split out from
-        `_maybe_fire_emote` so a tag mapping to more than one pool (e.g.
-        `confused` -> eyes + ball) fires each independently, with its own
-        cooldown/hotkey-alternation state. A pool on cooldown doesn't hold
-        back its sibling pool from the same tag.
+        """One pool's worth of firing -- split out from `_maybe_fire_emote`
+        so a tag mapping to more than one pool (e.g. `confused` -> eyes +
+        ball) fires each independently, with its own hotkey-alternation
+        state.
+
+        Session 11: no cooldown gate here anymore. A tag is a signal the
+        LLM deliberately chose to emit -- silently swallowing it because a
+        pool was still cooling down from an earlier fire is exactly the
+        "if this then this" restraint the user asked to break the chao
+        free of (see SESSION_STATE.md). `pool.cooldown_s` still exists and
+        is still read by `aliveness.py`'s `Aliveness` for its own,
+        separate cooldown tracking on autonomous reactions (chat_spike) --
+        those aren't LLM-chosen, so they still need rate-limiting against a
+        chatty input stream. Repeated same-pool tag fires are harmless in
+        practice: `VTSEmoteSubscriber` already extends the hold on a
+        same-file re-activation rather than erroring, and
+        `_choose_hotkey`'s never-same-hotkey-twice-consecutively rule still
+        applies below.
         """
         pool = self.emote_config.pools.get(pool_name)
         if pool is None or not pool.hotkeys:
             return
 
         now = self.clock()
-        last_fired = self._last_fired.get(pool_name)
-        if last_fired is not None and now - last_fired < pool.cooldown_s:
-            return
-
         hotkey = _choose_hotkey(pool, self._last_hotkey.get(pool_name), self.rng)
         self._last_fired[pool_name] = now
         self._last_hotkey[pool_name] = hotkey

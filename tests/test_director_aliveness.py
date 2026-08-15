@@ -173,6 +173,10 @@ def make_fly_config(**overrides) -> FlyConfig:
         "move_duration_s": 2.0,
         "land_duration_s": 1.5,
         "min_reposition_s": 8.0,
+        # Not overridden here on purpose: launch_probability defaults to
+        # 1.0 and boredom_probability to 0.0 on FlyConfig itself, which
+        # keeps every pre-existing deterministic test in this file passing
+        # unchanged. Tests of the probabilistic paths override explicitly.
     }
     defaults.update(overrides)
     return FlyConfig(**defaults)
@@ -508,3 +512,184 @@ def test_does_not_share_cooldown_with_tag_triggered_curious_emotes():
     aliveness.handle(Event(kind=Kind.BRAIN_REQUEST, turn_id="t2"))
 
     assert len([e for e in events if e.kind == Kind.DIRECTOR_EMOTE]) == 2
+
+
+# --- Fly.handle(): session 11 probabilistic launch (high arousal) ---
+
+
+def test_launch_probability_below_one_can_prevent_launch_on_crossing():
+    # seed 0's first draw is ~0.844, which fails a 0.5 probability check.
+    fly, events = make_fly(config=make_fly_config(launch_probability=0.5), rng=random.Random(0))
+
+    fly.handle(mood_event(0.9))
+
+    assert fly.flying is False
+    assert events == []
+
+
+def test_launch_probability_below_one_can_still_launch():
+    # seed 1's first draw is ~0.134, which passes a 0.5 probability check.
+    fly, events = make_fly(config=make_fly_config(launch_probability=0.5), rng=random.Random(1))
+
+    fly.handle(mood_event(0.9))
+
+    assert fly.flying is True
+    assert events[-1].payload["trigger"] == "arousal_high"
+
+
+def test_failed_launch_roll_is_edge_triggered_not_retried_while_sustained():
+    """A failed roll must not be retried on every subsequent mood event
+    while arousal stays above on_above -- otherwise launch_probability
+    barely reduces frequency at all, since arousal typically stays above
+    threshold for several ticks before decaying back down. Seed 0's first
+    three draws are ~0.844/0.758/0.421 -- the third would pass a 0.5 check
+    if it were ever consumed, so staying grounded here proves no re-roll
+    happened, not just that this particular draw failed too.
+    """
+    fly, events = make_fly(config=make_fly_config(launch_probability=0.5), rng=random.Random(0))
+
+    fly.handle(mood_event(0.9))
+    fly.handle(mood_event(0.85))
+    fly.handle(mood_event(0.95))
+
+    assert fly.flying is False
+    assert events == []
+
+
+def test_launch_roll_re_arms_after_dropping_back_below_on_above():
+    # seed 10: first draw ~0.571 fails a 0.5 check, second ~0.429 passes --
+    # only reachable if dropping below on_above genuinely re-arms the roll.
+    fly, events = make_fly(config=make_fly_config(launch_probability=0.5), rng=random.Random(10))
+
+    fly.handle(mood_event(0.9))  # crosses, rolls, fails
+    assert fly.flying is False
+
+    fly.handle(mood_event(0.5))  # drops back below on_above, re-arms
+    fly.handle(mood_event(0.9))  # crosses again, rolls, succeeds
+
+    assert fly.flying is True
+    assert events[-1].payload["trigger"] == "arousal_high"
+
+
+# --- Fly.handle(): session 11 boredom launch path ---
+
+
+def test_boredom_launch_requires_sustained_dwell_before_eligible():
+    clock = FakeClock()
+    fly, events = make_fly(
+        clock=clock,
+        config=make_fly_config(boredom_below=0.25, boredom_dwell_s=10.0, boredom_probability=1.0),
+    )
+
+    fly.handle(mood_event(0.1))  # arousal below boredom_below -- starts the dwell clock
+    clock.advance(5.0)  # short of boredom_dwell_s=10.0
+    fly.handle(mood_event(0.1))
+
+    assert fly.flying is False
+    assert events == []
+
+
+def test_boredom_launches_once_dwell_elapses():
+    clock = FakeClock()
+    fly, events = make_fly(
+        clock=clock,
+        config=make_fly_config(boredom_below=0.25, boredom_dwell_s=10.0, boredom_probability=1.0),
+    )
+
+    fly.handle(mood_event(0.1))
+    clock.advance(11.0)  # past boredom_dwell_s=10.0
+    fly.handle(mood_event(0.1))
+
+    assert fly.flying is True
+    assert events[-1].payload["trigger"] == "boredom"
+    assert events[-1].payload["target_x"] is not None
+
+
+def test_boredom_dwell_resets_if_arousal_rises_above_threshold():
+    clock = FakeClock()
+    fly, events = make_fly(
+        clock=clock,
+        config=make_fly_config(boredom_below=0.25, boredom_dwell_s=10.0, boredom_probability=1.0),
+    )
+
+    fly.handle(mood_event(0.1))  # starts the dwell clock at t=0
+    clock.advance(5.0)
+    fly.handle(mood_event(0.5))  # rises above boredom_below -- interrupts the dwell
+    clock.advance(6.0)  # 11s since t=0, but only 6s since the reset
+    fly.handle(mood_event(0.1))  # restarts the dwell clock at t=11
+
+    assert fly.flying is False
+    assert events == []
+
+
+def test_boredom_probability_can_prevent_launch_once_eligible():
+    # dwell=0 -> eligible on the very first below-threshold event. Seed 0's
+    # first draw (~0.844) fails a 0.5 probability check.
+    fly, events = make_fly(
+        config=make_fly_config(boredom_below=0.25, boredom_dwell_s=0.0, boredom_probability=0.5),
+        rng=random.Random(0),
+    )
+
+    fly.handle(mood_event(0.1))
+
+    assert fly.flying is False
+    assert events == []
+
+
+def test_boredom_probability_can_launch_once_eligible():
+    # seed 1's first draw (~0.134) passes a 0.5 probability check.
+    fly, events = make_fly(
+        config=make_fly_config(boredom_below=0.25, boredom_dwell_s=0.0, boredom_probability=0.5),
+        rng=random.Random(1),
+    )
+
+    fly.handle(mood_event(0.1))
+
+    assert fly.flying is True
+    assert events[-1].payload["trigger"] == "boredom"
+
+
+def test_boredom_probability_zero_never_launches_by_default():
+    fly, events = make_fly(
+        config=make_fly_config(boredom_below=0.25, boredom_dwell_s=0.0)  # boredom_probability=0.0
+    )
+
+    for _ in range(20):
+        fly.handle(mood_event(0.1))
+
+    assert fly.flying is False
+    assert events == []
+
+
+def test_boredom_path_does_not_apply_while_already_flying():
+    clock = FakeClock()
+    fly, events = make_fly(
+        clock=clock,
+        config=make_fly_config(boredom_below=0.25, boredom_dwell_s=0.0, boredom_probability=1.0),
+    )
+    fly.handle(mood_event(0.9))  # launches via high arousal
+    clock.advance(5.0)  # past min_dwell_s
+    events.clear()
+
+    fly.handle(mood_event(0.1))  # low arousal while flying -- lands, doesn't re-launch as bored
+
+    assert fly.flying is False
+    assert events[-1].payload["trigger"] == "arousal_low"
+
+
+def test_load_fly_config_parses_launch_and_boredom_fields(tmp_path):
+    path = tmp_path / "emotes.yaml"
+    path.write_text(
+        "fly:\n"
+        "  launch_probability: 0.4\n"
+        "  boredom_below: 0.2\n"
+        "  boredom_dwell_s: 30.0\n"
+        "  boredom_probability: 0.1\n"
+    )
+
+    config = load_fly_config(path)
+
+    assert config.launch_probability == 0.4
+    assert config.boredom_below == 0.2
+    assert config.boredom_dwell_s == 30.0
+    assert config.boredom_probability == 0.1

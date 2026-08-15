@@ -46,14 +46,25 @@ the one rate that has a real consumer today. See mood.py's docstring for
 the tick/publish design, and `Fly._on_mood`'s docstring for why
 repositioning specifically ignores tick-sourced mood events.
 
-Still not built, deliberately: idle-drift noise (§10.2) and the attention
-model (§10.3), and therefore the 60Hz/meso tiers of §10.1 — those
-genuinely need continuous parameter injection, which per CLAUDE.md's
-phase-0 finding requires new custom VTS parameters bound by hand in the
-VTS UI first, a real dependency on work only the user can do (see
-SESSION_STATE.md's next actions). Building the noise generators now, with
-no bound parameter to watch them drive, would repeat the "UI over nothing"
-mistake the dashboard's other panels deliberately avoided.
+Update (session 10 parts 7-8, correcting this docstring's earlier claim):
+idle-drift noise (§10.2) IS built — `director/idle_drift.py`'s `IdleDrift`,
+point-to-point head-turn/tilt motion, live-verified and explicitly locked
+in by the user ("so good right now, I don't want that changed" — session
+11). The "needs hand-bound VTS parameters first" blocker that used to sit
+here is resolved (`ChaoHeadTurn`/`ChaoHeadTilt`, part 7) and doesn't apply
+to this module at all — `IdleDrift` lives in its own file, not here.
+
+The attention model (§10.3) was investigated (session 10 part 3) and
+explicitly declined (session 11): the user's call was that there's no
+meaningful "place" for the chao to look, `[look:chat]`/`[look:you]` stay
+as harmless no-op telemetry, and `IdleDrift`'s current autonomous behavior
+is frozen as-is. Not a blocked feature — a closed question. Don't reopen
+it without the user raising it again.
+
+Still genuinely not built: the 60Hz/meso tiers of §10.1 beyond what
+`IdleDrift`/`Mood.tick()` already cover, and §10.6's boredom/macro-state
+accumulators (session 11's `Fly` boredom path is a narrow, Fly-specific
+version of the idea, not the general macro-state system §10.6 describes).
 """
 
 from __future__ import annotations
@@ -155,6 +166,24 @@ class FlyConfig:
     move_duration_s: float = 2.0
     land_duration_s: float = 1.5
     min_reposition_s: float = 8.0
+    # Session 11: "adventurous or bored or any feeling" redesign. Default
+    # 1.0 (always launch on crossing) preserves every pre-existing test's
+    # deterministic behavior untouched -- only config/chao.yaml's real
+    # value makes crossing genuinely a coin flip rather than a guarantee.
+    launch_probability: float = 1.0
+    # Boredom launch path: a second, independent way to take off besides
+    # high arousal, so flying isn't a one-note "excited" signal. Requires
+    # arousal to sit continuously below `boredom_below` for at least
+    # `boredom_dwell_s` before becoming eligible, then rolls
+    # `boredom_probability` on every mood event while eligible (not
+    # edge-triggered like the high-arousal path -- being bored is a
+    # sustained state, not a one-shot crossing, so repeated rolls while it
+    # persists is the intended behavior). Default probability 0.0 disables
+    # this path entirely unless configured, same "omitted/zero disables"
+    # shape as brain/local.py's num_thread/think.
+    boredom_below: float = 0.25
+    boredom_dwell_s: float = 45.0
+    boredom_probability: float = 0.0
 
 
 def load_fly_config(path: Path) -> FlyConfig:
@@ -176,6 +205,10 @@ def load_fly_config(path: Path) -> FlyConfig:
         move_duration_s=float(raw.get("move_duration_s", defaults.move_duration_s)),
         land_duration_s=float(raw.get("land_duration_s", defaults.land_duration_s)),
         min_reposition_s=float(raw.get("min_reposition_s", defaults.min_reposition_s)),
+        launch_probability=float(raw.get("launch_probability", defaults.launch_probability)),
+        boredom_below=float(raw.get("boredom_below", defaults.boredom_below)),
+        boredom_dwell_s=float(raw.get("boredom_dwell_s", defaults.boredom_dwell_s)),
+        boredom_probability=float(raw.get("boredom_probability", defaults.boredom_probability)),
     )
 
 
@@ -186,6 +219,25 @@ class Fly:
     boundary, plus the two hard rules — land on `[sad]` regardless of
     arousal, and (§10.6, not built yet) land during the low-energy macro
     state.
+
+    Session 11: launching is no longer a guaranteed consequence of crossing
+    a threshold. Two independent paths, both probabilistic:
+
+    - **High arousal** ("excited/adventurous"): crossing `on_above` rolls
+      `launch_probability` once (edge-triggered — re-arms only after
+      arousal dips back below `on_above`), instead of always launching.
+      This is what makes flying read as occasional again instead of firing
+      on nearly every emotionally-tagged turn (`_TAG_DELTAS` in mood.py
+      routinely pushes arousal from baseline straight past 0.70 on a
+      single tag — the probability roll is what keeps that from being a
+      guaranteed launch, not a retuning of the deltas themselves).
+    - **Boredom** ("any feeling" besides excited): arousal sitting
+      continuously below `boredom_below` for at least `boredom_dwell_s`
+      makes the chao eligible, then every mood event rolls
+      `boredom_probability` while eligible — not edge-triggered, since
+      being bored is a sustained state, not a one-shot crossing. Disabled
+      by default (`boredom_probability=0.0`); config/emotes.yaml carries
+      the real tuned values.
 
     Driven by two event kinds:
 
@@ -240,6 +292,15 @@ class Fly:
     _last_transition: float = field(init=False)
     _last_reposition: float = field(init=False)
     _directed: bool = field(default=False, init=False)
+    # High-arousal launch is edge-triggered: one roll per crossing, not one
+    # roll per mood event while sustained above on_above -- re-arms only
+    # once arousal dips back below on_above. Without this, launch_probability
+    # would barely reduce frequency at all: arousal typically stays above
+    # threshold for several ticks (half_life_s=20s decay is slow), so
+    # repeated per-tick rolls would still launch on nearly every crossing,
+    # just with a random delay instead of immediately.
+    _high_arousal_rolled: bool = field(default=False, init=False)
+    _bored_since: float | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         now = self.clock()
@@ -258,12 +319,31 @@ class Fly:
             return
 
         now = self.clock()
-        if not self.flying and arousal > self.config.on_above:
-            self._transition(True, "arousal_high", now, event.turn_id)
-        elif self.flying and arousal < self.config.off_below:
+        if not self.flying:
+            if arousal > self.config.on_above:
+                if not self._high_arousal_rolled:
+                    self._high_arousal_rolled = True
+                    if self.rng.random() < self.config.launch_probability:
+                        self._transition(True, "arousal_high", now, event.turn_id)
+                        return
+            else:
+                self._high_arousal_rolled = False
+
+            if arousal < self.config.boredom_below:
+                if self._bored_since is None:
+                    self._bored_since = now
+                if (
+                    now - self._bored_since >= self.config.boredom_dwell_s
+                    and self.rng.random() < self.config.boredom_probability
+                ):
+                    self._transition(True, "boredom", now, event.turn_id)
+                    return
+            else:
+                self._bored_since = None
+        elif arousal < self.config.off_below:
             if now - self._last_transition >= self.config.min_dwell_s:
                 self._transition(False, "arousal_low", now, event.turn_id)
-        elif self.flying and event.payload.get("source") == "tag":
+        elif event.payload.get("source") == "tag":
             self._maybe_reposition(now, event.turn_id)
 
     def _on_tag(self, event: Event) -> None:
@@ -302,6 +382,8 @@ class Fly:
             self.target_x = self.rng.uniform(self.config.x_min, self.config.x_max)
         else:
             self._directed = False
+            self._high_arousal_rolled = False
+            self._bored_since = None
         self._publish(turn_id, trigger)
 
     def _publish(self, turn_id: str | None, trigger: str) -> None:

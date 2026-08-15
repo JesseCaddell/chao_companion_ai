@@ -189,48 +189,42 @@ def test_pause_and_look_tags_produce_tag_event_but_no_emote():
     assert events[0].payload["tag"] == "look:chat"
 
 
-def test_cooldown_blocks_second_fire_within_window():
+def test_tag_sourced_fires_are_never_cooldown_gated():
+    """Session 11: a tag is a signal the LLM deliberately chose to emit --
+    the director must never silently swallow it because a pool happens to
+    still be cooling down from an earlier fire. `pool.cooldown_s` still
+    exists (aliveness.py's Aliveness reads it for its own, separate
+    cooldown on autonomous reactions), but Director itself no longer gates
+    on it at all.
+    """
     clock = FakeClock()
     director, events = make_director(clock=clock)
     director.begin_turn("t1")
 
     director.process_chunk("[happy] One. ")
-    clock.advance(1.0)  # cooldown_s is 4.0 for "happy"
-    director.process_chunk("[happy] Two. ")
-
-    emote_events = [e for e in events if e.kind == Kind.DIRECTOR_EMOTE]
-    assert len(emote_events) == 1
-
-
-def test_emote_fires_again_after_cooldown_elapses():
-    clock = FakeClock()
-    director, events = make_director(clock=clock)
-    director.begin_turn("t1")
-
-    director.process_chunk("[happy] One. ")
-    clock.advance(5.0)  # past the 4.0s cooldown
-    director.process_chunk("[happy] Two. ")
+    director.process_chunk("[happy] Two. ")  # immediately after -- well inside "happy"'s 4.0s
 
     emote_events = [e for e in events if e.kind == Kind.DIRECTOR_EMOTE]
     assert len(emote_events) == 2
 
 
-def test_cooldown_persists_across_begin_turn():
-    """A pool that fired near the end of turn N should still be cooling at
-    the start of turn N+1 — cooldowns are deliberately not per-turn state.
+def test_tag_fires_again_in_a_new_turn_without_waiting():
+    """A pool that fired near the end of turn N must still fire immediately
+    in turn N+1 -- no cross-turn suppression either, now that cooldown
+    gating is gone entirely.
     """
     clock = FakeClock()
     director, events = make_director(clock=clock)
     director.begin_turn("t1")
     director.process_chunk("[happy] One. ")
 
-    clock.advance(1.0)  # still inside "happy"'s 4.0s cooldown
     director.begin_turn("t2")
     director.process_chunk("[happy] Two. ")
 
     emote_events = [e for e in events if e.kind == Kind.DIRECTOR_EMOTE]
-    assert len(emote_events) == 1
+    assert len(emote_events) == 2
     assert emote_events[0].turn_id == "t1"
+    assert emote_events[1].turn_id == "t2"
 
 
 def test_hotkey_never_repeats_consecutively_with_two_hotkeys():
@@ -394,9 +388,11 @@ def test_confused_tag_fires_both_the_eyes_and_ball_pools():
     assert all(e.payload["reason"] == "confused" for e in emote_events)
 
 
-def test_confused_tags_two_pools_have_independent_cooldowns():
-    """One pool from a two-pool tag being on cooldown must not hold back
-    its sibling -- each pool tracks its own _last_fired independently.
+def test_confused_tags_two_pools_both_fire_every_time():
+    """One pool from a two-pool tag is unaffected by the other's cooldown
+    config -- neither is cooldown-gated at all now (session 11), so a
+    repeated `[confused]` fires both pools every time regardless of each
+    pool's configured cooldown_s.
     """
     clock = FakeClock()
     config = make_config(
@@ -407,9 +403,8 @@ def test_confused_tags_two_pools_have_independent_cooldowns():
     director.begin_turn("t1")
 
     director.process_chunk("[confused] One. ")
-    clock.advance(2.0)  # past confused_bub's 1.0s cooldown, well inside confused_eyes' 100s
     director.process_chunk("[confused] Two. ")
 
     pools_fired = [e.payload["pool"] for e in events if e.kind == Kind.DIRECTOR_EMOTE]
-    assert pools_fired.count("confused_eyes") == 1  # still cooling down
-    assert pools_fired.count("confused_bub") == 2  # fired both times
+    assert pools_fired.count("confused_eyes") == 2
+    assert pools_fired.count("confused_bub") == 2

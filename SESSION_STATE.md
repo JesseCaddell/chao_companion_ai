@@ -4,6 +4,152 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
+## Stopping point (session 11 part 3, 2026-08-14): "break chao free of if-this-then-this"
+
+Picked up from session 11 part 1's own recommended next step: reread design
+doc §10 and frame arbitration options for `advisor` before touching code.
+Started from the "next task, logged not started" item (LLM-directed
+movement/emotion instead of predetermined tracks) — but the user's own
+scoping conversation narrowed this dramatically from what the log entry
+implied, and most of the investigation below is about what got **ruled
+out**, not built.
+
+**Ruled out, explicitly, by the user — record this so a future session
+doesn't reopen it:**
+- **No distinction between `[look:chat]`/`[look:you]`, and no attention
+  model.** User's words: "There is no place for chao to be looking." The
+  two-stale-blockers finding that made §10.3's attention model newly
+  buildable (voice input and Twitch chat both went live since it was
+  shelved in session 10 part 3) turned out to be moot — the feature itself
+  isn't wanted, not just previously blocked.
+- **`IdleDrift` (head-turn/tilt autonomous motion) stays exactly as-is.**
+  "The way chao idle drifts its looking is so good right now. I dont want
+  that changed." Not touched this session; `aliveness.py`'s module
+  docstring corrected (see below) so this doesn't read as still-blocked
+  work for a future reader.
+- **Speech head-bob (`motion.py`/`VTSMotionPlayer`) stays exactly as-is.**
+  Explicit: "I dont want the headbob when chao speaks to change either."
+  Not touched.
+- **Grounded horizontal wandering is correct behavior, not a gap.**
+  Earlier in this same session I'd read `Fly._maybe_reposition` only
+  running while `self.flying` as a missing feature (idle drift doesn't
+  cover screen position, only head axes). User: "Its action is sitting.
+  So it should not glide around the ground while sitting." `Fly` is
+  unchanged in this respect — repositioning still only happens while
+  airborne.
+
+**What the actual ask distilled to, once narrowed:** "chao be able to
+freely use emotes when it deems appropriate" and fly "on its own, if its
+feeling adventurous or bored or honestly any feeling" — not tag-vocabulary
+expansion (§9's small-vocabulary constraint, now load-bearing since local
+is the standing default, stays untouched), not a new attention component,
+just two concrete mechanisms located in existing code:
+
+**1. Emote cooldown no longer gates tag-sourced fires.**
+`director.py`'s `_fire_pool` used to silently drop a tag's emote if its
+pool was still cooling down from an earlier fire — a real, previously
+unnoticed case of the LLM expressing something and nothing happening,
+with no error, no signal, anywhere. Removed the cooldown check entirely
+from `Director._fire_pool`; `EmotePool.cooldown_s` still exists and is
+still read by `aliveness.py`'s `Aliveness` for its own independent
+cooldown on autonomous reactions (`chat_spike`), which aren't LLM-chosen
+and still need rate-limiting against a chatty input stream. Hotkey
+alternation (never the same hotkey twice consecutively) is unaffected.
+**Flagged by `advisor`, not yet resolved:** removing the cooldown means a
+reply that swings through multiple tags mapping to the *same VTS channel*
+(e.g. `[happy] ... [sad] ... [happy] ...` — eyes channel each time) can now
+retrigger that channel back-to-back with nothing damping it, where the
+cooldown previously did. `VTSEmoteSubscriber`'s per-channel mutual
+exclusion (part 14) means each activation cuts the previous one off
+mid-hold rather than erroring, but the visual result — rapid same-channel
+strobing — is exactly what §6.6 warns against ("never sustain beyond
+~4s") from the opposite direction. **This needs a live-VTS check
+specifically watching for that pattern**, not just "does it feel more
+alive" — flagging this explicitly for whoever does that check (see below).
+
+**2. `Fly` launching is no longer a guaranteed consequence of crossing a
+threshold, and is now reachable from two independent mood states.**
+Real math behind the original "fires on almost every response" complaint:
+`baseline_arousal` is 0.3, and `Mood.handle` adds each tag's arousal delta
+directly on top (e.g. `[happy]` +0.6, `[curious]` +0.4) — every tag except
+`sad` clears the old 0.70 threshold from baseline alone, so flying was
+essentially guaranteed on any emotionally-tagged turn. `Fly` (`aliveness.py`)
+now has:
+- **`launch_probability`** (default 1.0 on `FlyConfig`, so every
+  pre-existing test's deterministic behavior is untouched; real value
+  0.35 in `emotes.yaml`): crossing `on_above` rolls once — *edge-triggered*,
+  meaning it re-arms only after arousal dips back below `on_above` and
+  re-crosses, not re-rolled on every mood tick while sustained above
+  (that would barely reduce frequency at all, since arousal typically
+  stays elevated for many ticks given `half_life_s=20s`). This is the fix
+  for "fires too often" — deliberately done by changing what a crossing
+  *means*, not by retuning `mood.py`'s delta table, which stays untouched
+  and out of scope.
+- **A new, independent boredom launch path** ("adventurous or bored or
+  honestly any feeling" — a single arousal>threshold gate can only ever
+  mean "excited"): arousal sitting continuously below `boredom_below` for
+  `boredom_dwell_s` makes the chao eligible, then every mood event rolls
+  `boredom_probability` while eligible (not edge-triggered — being bored
+  is a sustained state, not a one-shot crossing). Disabled by default
+  (`boredom_probability=0.0` on `FlyConfig`) so it's opt-in via config,
+  same "omitted/zero disables" shape as `brain/local.py`'s
+  `num_thread`/`think`.
+- **Real bug caught by `advisor` before this shipped wrong, not live:**
+  first draft set `emotes.yaml`'s `boredom_below: 0.2`, *below*
+  `baseline_arousal: 0.3`. `Mood.decay()` only moves arousal *toward*
+  baseline, never past it during genuine calm — so `arousal < 0.2` is
+  reachable only in the brief decay window after a `[sad]` tag, which
+  §6.4's existing hard-landing rule already owns. That's sadness, not
+  boredom, and the two conditions would have fought each other. Fixed to
+  `boredom_below: 0.35` (comfortably above baseline, so genuine idle
+  arousal actually satisfies it) with the reasoning written inline in
+  `emotes.yaml` so a future tuning pass doesn't reintroduce the same
+  mistake. **Tuning placeholder, not yet live-verified by ear** —
+  `launch_probability: 0.35`, `boredom_dwell_s: 45.0`,
+  `boredom_probability: 0.05` are first-guess values, same status as every
+  other "changed by feel, at runtime" config value in this project.
+- A second, much smaller change: `identity.md`'s tag protocol section now
+  tells the model it can use `[fly:left/right/center]` on its own
+  initiative, not just when asked — reuses the existing directed-fly
+  mechanism (`_on_directed_fly`, already live-verified, already bypasses
+  every autonomous floor) for spontaneous LLM-chosen flight, at zero new
+  vocabulary cost.
+
+**Corrected while in the file:** `aliveness.py`'s module docstring used to
+claim idle drift and the attention model were both "still not built,
+deliberately... need continuous parameter injection... a real dependency
+on work only the user can do" — stale on both counts (idle drift has been
+built and live-verified since part 8; the attention model was
+investigated and explicitly declined this session, not blocked). This
+exact stale claim is what sent this session chasing a "grounded wandering
+is missing" gap that the user then had to correct — fixed so it doesn't
+mislead a future reader the same way.
+
+**16 new/changed tests** across `test_director_director.py` (cooldown
+removal: tag fires are never gated, fire again immediately in a new turn,
+two-pool tags both fire every time regardless of configured cooldown) and
+`test_director_aliveness.py` (probabilistic launch: below-1.0 probability
+can prevent or allow a launch, a failed roll doesn't get silently retried
+while sustained above threshold — proven with a seed where a later draw
+would have succeeded if it had been consumed, re-arming after dropping
+back below threshold; boredom: dwell requirement, dwell reset on
+interruption, probability gating, disabled-by-default, doesn't apply
+while already flying; `load_fly_config` parses the four new fields). Full
+suite: **337 passed**, ruff clean, format clean.
+
+**Not yet live-verified against real VTS.** Two specific things to watch
+for, not just a general "does it feel better" check:
+1. The cooldown-removal risk flagged by `advisor` above — same-channel
+   pool thrashing on a reply that swings through multiple tags quickly.
+2. Whether the tuned `launch_probability`/boredom values actually read as
+   "occasional and varied" rather than "still constant" or "now never
+   happens" — these are first-guess numbers, expected to need live tuning
+   by ear, same as every other feel-parameter in this project.
+
+Not yet committed as of this writeup — landing now, then this needs a
+live-VTS pass before it's considered done, same as every other
+behavior-affecting change this project ships.
+
 ## Stopping point (session 11 part 1, 2026-08-14): Ollama CPU contention fix
 
 User's own live-testing since the last session (directed fly, part 16, is
