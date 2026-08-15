@@ -45,25 +45,6 @@ _TAG_PATTERN = re.compile(r"\[([a-zA-Z0-9_-]+)(?::([a-zA-Z0-9_-]+))?\]")
 # tolerant-parser spirit as _TAG_PATTERN above.
 _ACTION_PATTERN = re.compile(r"\*[^*]*\*")
 
-# Emoji, e.g. a local-backend response that closes with a bare "\U0001F60A".
-# The chao has no mouth (CLAUDE.md invariant 2) and no visual channel that
-# can render an emoji -- one reaching TTS gets read aloud as nothing (empty
-# `sentence_text`) or, worse, Piper attempting to vocalize the codepoint.
-# Covers the common pictograph/symbol/dingbat blocks plus the joiner/
-# variation-selector codepoints emoji sequences use to combine (skin tone
-# modifiers, ZWJ sequences, flags) -- not an exhaustive Unicode emoji
-# database, but enough for what a chat-model actually emits in practice.
-_EMOJI_PATTERN = re.compile(
-    "["
-    "\U0001f300-\U0001faff"  # pictographs, emoticons, transport, symbols, chess, extended-A
-    "\U00002600-\U000027bf"  # misc symbols, dingbats
-    "\U00002b00-\U00002bff"  # misc symbols and arrows (stars, etc.)
-    "\U0001f1e6-\U0001f1ff"  # regional indicators (flags)
-    "\U0000fe0f"  # variation selector-16
-    "\U0000200d"  # zero-width joiner
-    "]+"
-)
-
 SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
 
 
@@ -130,14 +111,6 @@ def strip_actions(text: str) -> str:
     say.
     """
     return re.sub(r"\s+", " ", _ACTION_PATTERN.sub("", text)).strip()
-
-
-def strip_emoji(text: str) -> str:
-    """Remove emoji from already tag-cleaned text. Same deterministic-
-    backstop reasoning as `strip_actions` -- a sentence that's entirely an
-    emoji collapses to "", which callers already treat as nothing to say.
-    """
-    return re.sub(r"\s+", " ", _EMOJI_PATTERN.sub("", text)).strip()
 
 
 def split_sentences(text: str) -> list[str]:

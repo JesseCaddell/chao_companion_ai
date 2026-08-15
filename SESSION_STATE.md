@@ -194,15 +194,21 @@ response (the fix is a pure-function deterministic strip, same low-risk
 category as `strip_actions`, which also wasn't separately live-re-verified
 after landing) — flagged here rather than silently assumed.
 
-**Also considered, not done, flagged for the user rather than acted on
-unilaterally:** `strip_actions`' own docstring calls itself "the
-deterministic backstop" for an instruction that lives in `identity.md` —
-there's no equivalent no-emoji instruction there, so emoji currently has
-only the code-side backstop and no prompt-level discouragement. Worth doing
-given the local (CPU-bound) backend burns real generation budget on emoji
-tokens that never reach spoken output — but `identity.md` edits are a
-CLAUDE.md escalate-before-changing item (the trait sheet), so this is a
-question for the user, not a change made without asking.
+**Superseded, same day:** flagged above as a question rather than a
+unilateral change — the user's own call was the opposite of "add a prompt
+instruction on top of the code backstop." `config/identity.md`'s
+Temperament paragraph now has a no-emoji line ("everything you say is
+spoken out loud, not read as text, so an emoji has nothing to land on"),
+and the code-side `strip_emoji`/`_EMOJI_PATTERN`/`Director._handle_sentence`
+call added earlier this same session were removed outright, not left as a
+disabled fallback — prompt-only, no deterministic backstop, unlike
+`strip_actions`' two-layer approach. Worth remembering if emoji resurfaces
+in practice: `strip_actions` exists specifically because prompt wording
+alone didn't reliably hold against action-narration; this is a bet that
+emoji is a weaker attractor than that was, not a proven one. The 8 tests
+and the code from the earlier commit were reverted along with it. Full
+suite still 326 passed (back to pre-emoji-fix count), ruff clean, format
+clean.
 
 ## Stopping point (session 10 part 5, 2026-08-13, live-verified)
 
