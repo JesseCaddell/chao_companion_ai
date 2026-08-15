@@ -4,6 +4,84 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
+## Stopping point (session 11 part 6, 2026-08-14): ended at usage limit — next session's plan, in order
+
+Session ended here on hitting the usage cap, not on a natural task boundary
+— nothing below is started, all of it is queued exactly as the user
+ordered it for next session.
+
+**Decided this session, not yet built:**
+- **Un-gate heart is done** (`a2c8fdb`) — `[affection]` now fires
+  `heart_bub` directly, no affinity check. Keep this decision in mind
+  while designing phase 6 below: affinity should still exist and should
+  still shape how chao reacts to specific viewers/topics, but must NOT
+  regain control over heart's reachability. Don't reintroduce the gate.
+- **Voice barge-in: explicitly declined.** User does not want chao ever
+  cut off mid-sentence. Don't build AEC/interruption. Off the backlog
+  entirely, not just deprioritized.
+- **`neutral` expression: explicitly declined.** Chao handles itself fine
+  without a rest-state expression. Don't build it unless the user raises
+  it again.
+
+**Next session, in the user's own stated order:**
+
+1. **Extend the dashboard override panel** (design doc §11.2 item 8) on
+   top of this session's command channel (`dashboard/server.py`'s
+   `create_app(bus, set_backend=..., set_free_speech=...)` pattern —
+   follow the same optional-callable, degrade-to-no-op shape for each new
+   command). Oriented but did not write code; the concrete plan:
+   - **Fire any emote** — `{type: "fire_emote", pool: str}`. Reuse
+     `director.py`'s module-level `_choose_hotkey(pool, last, rng)` (not
+     currently exported — either export it or duplicate the tiny
+     never-same-hotkey-twice logic) to pick a hotkey from `emote_config`,
+     then publish `Kind.DIRECTOR_EMOTE` directly. No cooldown check
+     needed — matches this session's "tag-sourced fires are never
+     cooldown-gated" redesign.
+   - **Force a mood** — `{type: "force_mood", valence: float, arousal:
+     float}`. Needs `Mood` promoted out of `_run_mood`'s local scope into
+     a `main()`-level object (same pattern this session already used for
+     `free_speech`/`orchestrator`) so a command handler can set
+     `mood.valence`/`mood.arousal` directly and publish a real
+     `Kind.DIRECTOR_MOOD` event (`source: "manual"`) so `Fly`/other
+     consumers see it.
+   - **Inject a fake chat message** — `{type: "inject_chat", text: str,
+     login?: str}`. Reuse `inputs/twitch.py`'s `score_priority` to compute
+     a real tier, publish `Kind.INPUT_CHAT` with that priority.
+   - **Force a response** — `{type: "send_manual", text: str}`, publishes
+     `Kind.INPUT_MANUAL` — same mechanism the stdin loop already uses, just
+     reachable from the dashboard (useful once running via the native
+     window, with no terminal attached).
+   - **Kill/revive buttons** — `{type: "kill"}` / `{type: "revive"}` can
+     call `bus.kill()`/`bus.revive()` directly inside `_handle_command`;
+     `bus` is already in scope in `create_app`, no new injected callable
+     needed. Physical hotkeys already do this — this is just a dashboard
+     button doing the same thing for when hands are elsewhere.
+   - Frontend: extend `App.tsx`'s `.controls` row (or a new panel section)
+     with inputs for each of the above, same `sendCommand()` helper
+     already built this session.
+
+2. **Twitch hardening.** No reconnect-on-drop (`TwitchChatClient`'s task
+   just ends and goes quiet on disconnect today), no chat rate-limit
+   backstop, no username sanitization beyond `display_name`-preferred.
+   Not scoped in detail yet — start by rereading `inputs/twitch.py`'s
+   module docstring for what was deliberately deferred and why.
+
+3. **Phase 6 memory/affinity — design pass with `advisor` before any code,
+   prep only, no build this session or possibly not even next.** Was
+   mid-orientation (design doc §4.4's four-table SQLite schema: `viewers`
+   with an `affinity` column, `episodes`, `beliefs`, `sessions`, plus a
+   `episode_vec` vector table for retrieval) when the session ended.
+   CLAUDE.md explicitly names "retrieval scoring or the affinity function"
+   as an Opus-escalation-required item — don't skip that step. Frame the
+   advisor conversation around: affinity's role now that it doesn't gate
+   heart (per the decision above — it should still drive *how* chao reacts
+   to specific viewers/topics, just not *whether* an expression is
+   reachable), what "reflection" (the offline job that writes to
+   `beliefs`) actually needs to do given nothing upstream of it exists yet,
+   and what the smallest real slice is that has an actual consumer (same
+   "don't build UI over nothing" discipline this project has followed all
+   along) rather than building the full four-table schema speculatively.
+
 ## Stopping point (session 11 part 5, 2026-08-14): dashboard command channel, backend toggle, free speech
 
 User asked for two dashboard features: a live toggle between the local and
