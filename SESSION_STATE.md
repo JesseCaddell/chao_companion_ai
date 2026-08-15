@@ -137,18 +137,49 @@ interruption, probability gating, disabled-by-default, doesn't apply
 while already flying; `load_fly_config` parses the four new fields). Full
 suite: **337 passed**, ruff clean, format clean.
 
-**Not yet live-verified against real VTS.** Two specific things to watch
-for, not just a general "does it feel better" check:
-1. The cooldown-removal risk flagged by `advisor` above — same-channel
-   pool thrashing on a reply that swings through multiple tags quickly.
-2. Whether the tuned `launch_probability`/boredom values actually read as
-   "occasional and varied" rather than "still constant" or "now never
-   happens" — these are first-guess numbers, expected to need live tuning
-   by ear, same as every other feel-parameter in this project.
+**Live-verified against real VTS, same day, three throwaway scripts (not
+committed) importing and driving the actual production `Bus`/`Director`/
+`Mood`/`Fly`/`_run_vts_subscriber` — no reimplementation:**
 
-Not yet committed as of this writeup — landing now, then this needs a
-live-VTS pass before it's considered done, same as every other
-behavior-affecting change this project ships.
+1. **Same-channel thrashing (the `advisor`-flagged cooldown-removal
+   risk):** fired `[happy] → [sad] → [happy] → [confused]` back-to-back
+   through a real `Director`, no gap. **User: "it looked good, no
+   strobing."** Cooldown removal doesn't need a compensating rate-limit
+   after all — closed, not just landed.
+2. **Probabilistic launch**, 6 independent trials (fresh `Fly` per trial,
+   real unseeded rng, real config `launch_probability=0.35`), each forced
+   to a landed baseline first: 1/6 launched (trial 5). **User confirmed
+   the visual result matched exactly** — grounded on 1-4 and 6, took off
+   on 5. A bit under the nominal 0.35 rate, well within normal variance
+   for n=6 — not a concern.
+3. **Boredom launch through the real `Mood.tick()` decay pipeline**, not
+   a synthetic mood event — the one path with genuine tick-timing/epsilon-
+   gating dependencies a `FakeClock` unit test only approximates. Seeded
+   arousal to 0.4 (just above `boredom_below`) and let real decay carry it
+   down; `boredom_dwell_s` shortened to 8s and `boredom_probability` to
+   1.0 *for this check's script only* (not the committed config) to keep
+   the real wait to ~30s instead of several minutes. Launched at t=28s,
+   arousal having decayed to ~0.34. **User: "took off right on time."**
+   Confirms the earlier open worry (would `Mood.tick()`'s
+   move-since-last-tick epsilon gating stop publishing before a real
+   boredom window could ever complete?) doesn't bite in practice, at
+   least not at this dwell/decay scale — real production
+   `boredom_dwell_s=45` sits well inside the tail where `Mood.tick()` is
+   still publishing (a rough estimate from `half_life_s=20` puts
+   meaningful publishing continuing for a couple minutes after any real
+   excitation), so the mechanism should hold at the tuned value too, not
+   just the shortened test value. Worth re-confirming at the real 45s
+   value if it ever seems not to fire during actual use — not chased
+   further this session since the mechanism itself is now proven, only
+   the exact dwell/probability numbers remain untuned-by-ear.
+
+All three checks: no code changes needed, no regressions. This closes out
+the "needs a live-VTS pass" caveat from earlier in this same session —
+mechanism confirmed correct on all three fronts. What's left is ordinary
+by-feel tuning of `launch_probability`/`boredom_dwell_s`/
+`boredom_probability`'s exact values during actual use, same status as
+every other feel-parameter in this project (not a correctness question
+anymore).
 
 ## Stopping point (session 11 part 1, 2026-08-14): Ollama CPU contention fix
 
