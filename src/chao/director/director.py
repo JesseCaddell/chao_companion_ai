@@ -39,19 +39,29 @@ from chao.director.tags import SENTENCE_BOUNDARY, ParsedTag
 from chao.events import Event, Kind
 
 # §6.2. `pause` and `look:*` are attention/motion signals, not emotes —
-# left out on purpose. `heart` isn't reachable via this table at all
-# (§6.3: affinity-gated, not a direct tag mapping).
+# left out on purpose.
 #
 # Session 10 part 14: values are tuples, not single pool names -- eyes
 # and ball are separate VTS expression files now (user split them after
 # the global mutual-exclusion fix turned out to be too blunt, see
 # outputs/vts.py). Most tags map to exactly one pool (one channel); only
 # `confused` maps to two -- it has both an eyes state and a ball icon
-# (the "swirl"/corkscrew per design doc §6.1's ball vocabulary). `heart`
-# is ball-only and still not reachable here, same as before.
+# (the "swirl"/corkscrew per design doc §6.1's ball vocabulary).
+#
+# Session 11: `affection` now also fires `heart_bub` -- this restores
+# §6.2's *original* tag table, which always specced affection's ball
+# output as heart; §6.3's later affinity-gating spec carved heart out as
+# a special case reachable only through a not-yet-built affinity system,
+# not a direct tag. User's explicit call: heart is too important an
+# expression to gate behind a system that doesn't exist yet, and
+# gate-worthiness isn't a reason to withhold it from the LLM's own
+# judgment any more than any other emote is (this session's broader
+# "freely use emotes" redesign, see aliveness.py/director.py history).
+# Affinity itself is still being built (phase 6) -- it just no longer
+# owns heart's reachability, only how chao reacts to specific viewers.
 _TAG_TO_POOL: dict[str, tuple[str, ...]] = {
     "happy": ("happy_eyes",),
-    "affection": ("happy_eyes",),
+    "affection": ("happy_eyes", "heart_bub"),
     "curious": ("question_bub",),
     "thinking": ("question_bub",),
     "surprise": ("surprise_bub",),

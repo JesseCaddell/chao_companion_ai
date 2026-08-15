@@ -29,6 +29,9 @@ def default_config() -> EmoteConfig:
         angry_eyes=EmotePool(
             hotkeys=["chao.angry"], cooldown_s=15.0, duration_s=3.0, channel="eyes"
         ),
+        heart_bub=EmotePool(
+            hotkeys=["chao.heart"], cooldown_s=12.0, duration_s=3.0, channel="ball"
+        ),
     )
 
 
@@ -386,6 +389,20 @@ def test_confused_tag_fires_both_the_eyes_and_ball_pools():
     emote_events = [e for e in events if e.kind == Kind.DIRECTOR_EMOTE]
     assert {e.payload["pool"] for e in emote_events} == {"confused_eyes", "confused_bub"}
     assert all(e.payload["reason"] == "confused" for e in emote_events)
+
+
+def test_affection_tag_fires_both_eyes_and_heart_pools():
+    """Session 11: heart is no longer affinity-gated -- [affection] reaches
+    it directly, same two-pool shape as [confused].
+    """
+    director, events = make_director()
+    director.begin_turn("t1")
+
+    director.process_chunk("[affection] Aww. ")
+
+    emote_events = [e for e in events if e.kind == Kind.DIRECTOR_EMOTE]
+    assert {e.payload["pool"] for e in emote_events} == {"happy_eyes", "heart_bub"}
+    assert all(e.payload["reason"] == "affection" for e in emote_events)
 
 
 def test_confused_tags_two_pools_both_fire_every_time():
