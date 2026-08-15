@@ -4,6 +4,63 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
+## Stopping point (session 11 part 4, 2026-08-14): dashboard feed swamped by vts.param, plus a real conversation
+
+User had a real conversation with chao (voice + the part 3 emote/fly changes
+live) and brought back two findings from the transcript/log.
+
+**Finding, not acted on — the user's own read, recorded rather than
+changed:** asking chao directly to change its expression did nothing, but
+praise or "that didn't work" got a real expression change. User's
+conclusion: "It is not aware that it can change them on command, but it
+does it subconsciously. I think this works and makes sense." Consistent
+with how tags are actually specced (§9: sparse *felt* signals, not a
+command-following API) and with `identity.md`'s asymmetry — `[fly:*]` has
+an explicit "if someone asks you to move... that's how you get there"
+carve-out, general emotion tags don't. Not changed this session since the
+user read it as working-as-intended; worth remembering as a real design
+choice (tags reflect chao's own state, not user stage-direction) if it
+comes up again, rather than an unexplained gap.
+
+**Real, actionable finding: the dashboard's event feed is swamped by
+`vts.param` telemetry.** The user's actual conversation transcript was
+mostly unrecoverable from the live log — pasted a chunk showing
+`ChaoHeadTilt`/`ChaoHeadTurn`/`ChaoHeadBob` values arriving multiple times
+a second (idle drift's always-on ~10Hz tick plus speech motion's 5Hz
+envelope replay, both already sampled server-side via
+`publish_every_n_frames=6` per `outputs/vts.py`) interleaved with the
+actually-meaningful events (`director.tag`, `director.emote`,
+`output.speech_*`, `brain.complete`, `state.fly`). `App.tsx`'s feed is
+capped at `MAX_ENTRIES=200` with no filtering, so the param spam alone
+was enough to push real conversation history out of the buffer within
+seconds — the code comment that originally justified the 1-in-6 sampling
+rate ("pure bus noise nothing consumes yet, no sparkline panel exists")
+turned out to be wrong once the generic event feed became that consumer
+by accident.
+
+**Fixed**, matching design doc §11.2 item 5 ("parameter sparklines") in
+the smallest form that solves the immediate problem — a live current-value
+readout, not a scrolling log or a chart:
+- `App.tsx`: `vts.param` events are now diverted into a separate `params`
+  state (`Record<string, number>`, latest value per parameter name) and
+  never pushed into `entries` at all — every one of the 200 feed slots is
+  now a meaningful event, not just visually filtered while still eating a
+  slot.
+- Rendered as a small readout strip (`.params`/`.param` in `index.css`,
+  matching the existing dark/light `:root` token scheme) between the
+  header and the streaming-reply bubble: `ChaoHeadBob: 12.3` etc., sorted
+  alphabetically, only rendered when at least one param has arrived.
+- `npm run build` (tsc -b + vite build) and `npm run lint` (oxlint) both
+  clean. `dist/` is gitignored (build artifact); only `src/App.tsx` and
+  `src/index.css` are committed — needs `npm run build` again to actually
+  update what the running `chao` process serves.
+
+**Not yet visually confirmed in a real browser this session** — the
+Chrome extension wasn't loaded/available; asked the user to refresh the
+dashboard tab and confirm the params strip renders and the feed stays
+legible during a real conversation, rather than claiming a visual check
+that didn't happen.
+
 ## Stopping point (session 11 part 3, 2026-08-14): "break chao free of if-this-then-this"
 
 Picked up from session 11 part 1's own recommended next step: reread design

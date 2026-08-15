@@ -42,6 +42,14 @@ export default function App() {
   // A single in-flight turn (bus.py's arbitration) means this is normally
   // at most one entry, but keying by turn_id avoids assuming that.
   const [streaming, setStreaming] = useState<Record<string, string>>({})
+  // vts.param telemetry (idle drift + speech motion) fires several times a
+  // second, continuously -- even sampled server-side (outputs/vts.py's
+  // publish_every_n_frames), it drowned the transcript out of the capped
+  // MAX_ENTRIES feed within seconds. Kept out of `entries` entirely (never
+  // spends a feed slot) and shown as a live current-value readout instead
+  // -- a minimal version of design doc §11.2 item 5 (parameter sparklines),
+  // not a scrolling log of its own.
+  const [params, setParams] = useState<Record<string, number>>({})
 
   useEffect(() => {
     const ws = new WebSocket(WS_URL)
@@ -49,6 +57,13 @@ export default function App() {
     ws.onclose = () => setConnected(false)
     ws.onmessage = (msg) => {
       const event = JSON.parse(msg.data as string) as ChaoEvent
+
+      if (event.kind === 'vts.param') {
+        const name = event.payload.name as string
+        const value = event.payload.value as number
+        setParams((prev) => ({ ...prev, [name]: value }))
+        return
+      }
 
       if (event.kind === 'brain.token') {
         const key = event.turn_id ?? 'unknown'
@@ -79,6 +94,18 @@ export default function App() {
           {connected ? 'connected' : 'disconnected'}
         </span>
       </header>
+
+      {Object.keys(params).length > 0 && (
+        <div className="params">
+          {Object.entries(params)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([name, value]) => (
+              <span className="param" key={name}>
+                {name}: {value.toFixed(1)}
+              </span>
+            ))}
+        </div>
+      )}
 
       {Object.values(streaming).map((text, i) => (
         <div className="streaming" key={i}>
