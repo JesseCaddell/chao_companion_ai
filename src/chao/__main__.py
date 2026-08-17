@@ -360,10 +360,14 @@ async def _run_fly(bus: Bus, fly_config: FlyConfig) -> None:
 
 
 # Session 11 hardening: capped backoff after a dropped Twitch connection
-# (network blip, Twitch's own RECONNECT notice, or an outright connection
-# failure -- inputs/twitch.py's run() ends normally or raises for all
-# three, so one retry loop here covers all of them). A connection that
-# stayed up at least _TWITCH_STABLE_CONNECTION_S resets the backoff, so a
+# (network blip, Twitch's own RECONNECT notice, a connect-time rejection
+# -- bad token, 429, maintenance -- or an outright connection failure).
+# The except clause below catches websockets.exceptions.WebSocketException
+# rather than just ConnectionClosed specifically: connect() itself raises
+# InvalidHandshake (a WebSocketException, not a ConnectionClosed) on a
+# rejected upgrade, and that failure mode is otherwise silent -- same bug
+# as the drop-mid-stream case, one step earlier. A connection that stayed
+# up at least _TWITCH_STABLE_CONNECTION_S resets the backoff, so a
 # transient blip recovers in ~1s while a persistently broken config (dead
 # channel, bad token) settles at the cap instead of hot-looping Twitch.
 _TWITCH_RECONNECT_BACKOFF_S: tuple[float, ...] = (1.0, 2.0, 5.0, 10.0, 30.0)
@@ -419,7 +423,7 @@ async def _run_twitch(bus: Bus, twitch_config: TwitchConfig) -> None:
         try:
             await client.run()
             print("  (Twitch connection cycled by the server, reconnecting)")
-        except (OSError, RuntimeError, websockets.exceptions.ConnectionClosed) as e:
+        except (OSError, RuntimeError, websockets.exceptions.WebSocketException) as e:
             print(f"  (Twitch chat dropped: {e} -- reconnecting)")
         if time.monotonic() - started >= _TWITCH_STABLE_CONNECTION_S:
             attempt = 0
