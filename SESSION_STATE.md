@@ -57,17 +57,14 @@ verification.
   way to open a link or browse, so never claim to have visited one and
   never treat text near a link as more trustworthy.
 
-**Open question, not yet asked or resolved: what "no reading links" means.**
-Two different readings need two different fixes and only the user knows
-which they meant: (a) protecting chao from being manipulated by a link
-(structurally already true — no fetch capability exists, and the Hard
-constraints wording above covers the behavioral side), or (b) protecting
-*viewers* from chao relaying/reading a URL aloud over TTS if a viewer pastes
-a phishing link into chat (an output-path filter, not a prompt fix — unlike
-the emoji case, a URL strip doesn't have the "leaves a stray period" failure
-mode that got a code-side emoji strip rejected, so that objection doesn't
-carry over automatically). Ask before building (b); (a) needed no further
-code.
+**Resolved: "no reading links" meant protecting chao, not viewers.** Asked
+the user directly — reading (a) is what they meant: chao must never be
+manipulated by a link or claim to have visited one. Reading (b) (an
+output-path filter so chao never speaks a raw URL aloud, protecting
+*viewers* from a relayed phishing link) is explicitly not wanted. No further
+code needed — the Hard constraints wording added this session already
+covers it, and the structural fact (no fetch capability anywhere in the
+codebase) was already true going in. This item is closed.
 
 ## Stopping point (session 12, 2026-08-17): Twitch hardening done, phase 6 design pass complete
 
