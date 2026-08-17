@@ -79,6 +79,51 @@ async def test_viewer_summary_returns_none_for_unknown_login(tmp_path: Path):
     assert await store.viewer_summary("nobody") is None
 
 
+async def test_touch_viewer_defaults_affinity_to_zero(tmp_path: Path):
+    store = make_store(tmp_path)
+
+    await store.touch_viewer("someuser", None)
+
+    summary = await store.viewer_summary("someuser")
+    assert summary.affinity == 0.0
+
+
+async def test_touch_viewer_applies_affinity_delta_on_insert_and_update(tmp_path: Path):
+    store = make_store(tmp_path)
+
+    await store.touch_viewer("someuser", None, affinity_delta=0.05)
+    summary = await store.viewer_summary("someuser")
+    assert summary.affinity == 0.05
+
+    await store.touch_viewer("someuser", None, affinity_delta=0.02)
+    summary = await store.viewer_summary("someuser")
+    assert abs(summary.affinity - 0.07) < 1e-9
+
+
+async def test_touch_viewer_clamps_affinity_to_plus_minus_one(tmp_path: Path):
+    store = make_store(tmp_path)
+
+    for _ in range(50):
+        await store.touch_viewer("someuser", None, affinity_delta=0.05)
+
+    summary = await store.viewer_summary("someuser")
+    assert summary.affinity == 1.0
+
+
+async def test_touch_viewer_affinity_never_moves_without_a_delta(tmp_path: Path):
+    """Background-tier chat (score_priority tiers 3-5) contributes no
+    affinity delta -- confirms a plain touch_viewer call (the caller's
+    default) leaves affinity untouched, not silently nudged.
+    """
+    store = make_store(tmp_path)
+    await store.touch_viewer("someuser", None, affinity_delta=0.05)
+
+    await store.touch_viewer("someuser", None)  # no affinity_delta passed
+
+    summary = await store.viewer_summary("someuser")
+    assert summary.affinity == 0.05
+
+
 async def test_recent_episodes_orders_newest_first_and_respects_limit(tmp_path: Path):
     clock = FakeClock(1000.0)
     store = make_store(tmp_path, clock=clock)

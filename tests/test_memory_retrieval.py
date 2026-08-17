@@ -36,6 +36,35 @@ async def test_build_memory_familiarity_label_scales_with_days_seen(tmp_path: Pa
     assert "someuser" in memory
 
 
+async def test_build_memory_omits_affinity_clause_below_threshold(tmp_path: Path):
+    store = make_store(tmp_path)
+    await store.touch_viewer("someuser", None)  # affinity stays 0.0
+
+    memory, _turns = await build_memory(store, login="someuser")
+
+    assert "fond" not in memory
+    assert "enjoys" not in memory
+
+
+async def test_build_memory_adds_warm_clause_at_mid_affinity(tmp_path: Path):
+    store = make_store(tmp_path)
+    await store.touch_viewer("someuser", None, affinity_delta=0.2)
+
+    memory, _turns = await build_memory(store, login="someuser")
+
+    assert "enjoys talking with them" in memory
+    assert "fond" not in memory
+
+
+async def test_build_memory_adds_fond_clause_at_high_affinity(tmp_path: Path):
+    store = make_store(tmp_path)
+    await store.touch_viewer("someuser", None, affinity_delta=0.5)
+
+    memory, _turns = await build_memory(store, login="someuser")
+
+    assert "especially fond of them" in memory
+
+
 async def test_build_memory_uses_login_not_display_name(tmp_path: Path):
     """Session 12: the memory line is safe to fold unwrapped into the
     trusted system prompt only because it's built from `login`

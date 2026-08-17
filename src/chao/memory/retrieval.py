@@ -32,6 +32,25 @@ def _familiarity_label(days_seen: int) -> str:
     return _FAMILIARITY_REGULAR
 
 
+# Session 12 part 4: affinity is a distinct axis from familiarity above --
+# not "how often," but "how well interactions with them have gone," built
+# only from score_priority's already-computed tiers (see store.py's module
+# docstring for why the update rule stops there for now). This clause is
+# additive text only; it must never gate anything -- heart already fires
+# on [affection] unconditionally (session 11) at any affinity value,
+# including the default 0.0 a brand-new viewer starts at.
+_AFFINITY_FOND_THRESHOLD = 0.4
+_AFFINITY_WARM_THRESHOLD = 0.15
+
+
+def _affinity_clause(affinity: float) -> str:
+    if affinity >= _AFFINITY_FOND_THRESHOLD:
+        return " Chao's especially fond of them."
+    if affinity >= _AFFINITY_WARM_THRESHOLD:
+        return " Chao enjoys talking with them."
+    return ""
+
+
 async def build_memory(
     store: MemoryStore, *, login: str | None, episode_limit: int = DEFAULT_EPISODE_LIMIT
 ) -> tuple[str, list[Turn]]:
@@ -51,6 +70,7 @@ async def build_memory(
     memory = (
         f"{login} is {_familiarity_label(summary.days_seen)} -- "
         f"{summary.interactions} messages across {summary.days_seen} day(s)."
+        f"{_affinity_clause(summary.affinity)}"
     )
 
     rows = await store.recent_episodes(summary.id, episode_limit)

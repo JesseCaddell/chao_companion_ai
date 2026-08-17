@@ -258,6 +258,53 @@ async def test_memory_writer_touches_viewer_for_direct_and_background_tier_chat(
     assert summary.interactions == 2
 
 
+async def test_memory_writer_applies_affinity_delta_by_priority_tier(tmp_path: Path):
+    """Session 12 part 4: a mention (tier 1) and a question (tier 2) are
+    unconfounded, directly observable engagement -- background chat
+    (tier 5) earns no affinity at all. Confirms __main__.py's
+    _AFFINITY_DELTA_BY_PRIORITY actually reaches store.touch_viewer.
+    """
+    bus = Bus()
+    store = MemoryStore(tmp_path / "test.db")
+    task = asyncio.create_task(_run_memory_writer(bus, store))
+    await asyncio.sleep(0)
+
+    bus.publish(
+        Event(
+            kind=Kind.INPUT_CHAT, payload={"login": "someuser", "text": "hey chao", "priority": 1}
+        )
+    )
+    await _wait_until(lambda: store.viewer_summary("someuser"))
+    bus.publish(
+        Event(
+            kind=Kind.INPUT_CHAT,
+            payload={"login": "someuser", "text": "how are you?", "priority": 2},
+        )
+    )
+
+    async def two_interactions():
+        summary = await store.viewer_summary("someuser")
+        return summary if summary.interactions == 2 else None
+
+    summary = await _wait_until(two_interactions)
+    bus.publish(
+        Event(
+            kind=Kind.INPUT_CHAT,
+            payload={"login": "someuser", "text": "just chatting", "priority": 5},
+        )
+    )
+
+    async def three_interactions():
+        summary = await store.viewer_summary("someuser")
+        return summary if summary.interactions == 3 else None
+
+    summary = await _wait_until(three_interactions)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert abs(summary.affinity - 0.07) < 1e-9  # 0.05 + 0.02 + 0.0
+
+
 async def test_memory_writer_writes_an_episode_on_brain_complete(tmp_path: Path):
     bus = Bus()
     store = MemoryStore(tmp_path / "test.db")

@@ -501,6 +501,15 @@ _INPUT_KIND_TO_SOURCE: dict[str, str] = {
     Kind.INPUT_AMBIENT: "ambient",
 }
 
+# Session 12 part 4: affinity's update rule, observable half only (see
+# memory/store.py's module docstring for why chao's own emitted-tag
+# valence was rejected as the signal). twitch.py's score_priority tier is
+# already computed per-message and unconfounded -- a direct name mention
+# (tier 1) is stronger evidence of intentional engagement than a question
+# (tier 2); tiers 3-5 (background chatter) earn nothing. Never gates
+# heart or anything else -- purely additive to the stored scalar.
+_AFFINITY_DELTA_BY_PRIORITY: dict[int, float] = {1: 0.05, 2: 0.02}
+
 
 @dataclass(frozen=True, slots=True)
 class _PendingEpisode:
@@ -519,8 +528,10 @@ async def _run_memory_writer(bus: Bus, store: MemoryStore) -> None:
     Two independent jobs: `touch_viewer` fires for every `Kind.INPUT_CHAT`
     (all tiers -- session 12's design pass wants `interactions` to
     reflect real chat activity, not just messages that won turn
-    arbitration), and `write_episode` fires when a stashed turn's
-    `Kind.BRAIN_COMPLETE` arrives with a real reply.
+    arbitration), also applying an affinity delta from the message's
+    already-scored priority tier (`_AFFINITY_DELTA_BY_PRIORITY` above);
+    and `write_episode` fires when a stashed turn's `Kind.BRAIN_COMPLETE`
+    arrives with a real reply.
 
     Pending turns are stashed by `turn_id` and popped on `BRAIN_COMPLETE`;
     a cancelled or arbitration-losing turn never gets one, so entries are
@@ -549,8 +560,11 @@ async def _run_memory_writer(bus: Bus, store: MemoryStore) -> None:
         try:
             if event.kind == Kind.INPUT_CHAT:
                 login = event.payload.get("login")
+                affinity_delta = _AFFINITY_DELTA_BY_PRIORITY.get(event.payload.get("priority"), 0.0)
                 viewer_id = (
-                    await store.touch_viewer(login, event.payload.get("display_name"))
+                    await store.touch_viewer(
+                        login, event.payload.get("display_name"), affinity_delta=affinity_delta
+                    )
                     if login
                     else None
                 )
