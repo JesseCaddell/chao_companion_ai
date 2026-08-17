@@ -4,6 +4,73 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
+## Stopping point (session 12 part 4, 2026-08-17): affinity restored — ended at usage limit, not a natural boundary
+
+Session ended here on hitting the usage cap mid-flow, same shape as session
+11 part 6's stopping point — everything below is committed and the test
+suite is green, but the natural next step (live-verify) has not happened
+yet. Pick up by running that, not by re-deriving anything.
+
+**What happened:** right after part 3 shipped, the user caught a real
+design mistake: part 3 (and `advisor`, and me) had conflated "de-gate heart
+from affinity" (session 11 — heart fires on `[affection]` unconditionally
+now, no threshold) with "affinity doesn't need to exist as a stored value
+at all." Those are different decisions. The user only asked for the first
+one; part 3 quietly did the second one too. User's own words: "we scrapped
+the viewer affinity cause we wanted to be able to use the heart emotion
+more often... I dont think we should scrap this system completely."
+
+**Fix, escalated to `advisor` first** (this is exactly CLAUDE.md's
+"retrieval scoring or the affinity function" trigger): `viewers.affinity`
+is back in the schema (`REAL`, clamped to `[-1.0, 1.0]` in SQL on every
+write via `MAX(-1.0, MIN(1.0, affinity + ?))`). The update rule is
+deliberately the *observable half only* — advisor's key correction to my
+first instinct (chao's own emitted-tag mood valence, `director/mood.py`'s
+`_TAG_DELTAS`) was that chao's mood during a turn is confounded by
+whatever else is going on and isn't really evidence about *that specific
+viewer's* behavior. What's actually unconfounded and already computed:
+`inputs/twitch.py`'s `score_priority` tier. `__main__.py`'s new
+`_AFFINITY_DELTA_BY_PRIORITY = {1: 0.05, 2: 0.02}` bumps affinity on a
+direct name mention or a question; background chat (tiers 3-5) earns
+nothing. A real "was this viewer nice to chao" sentiment signal needs
+classification this project doesn't have — deferred, not guessed at, and
+not a TODO to lose track of: revisit if/when a real signal exists, not by
+reaching for the mood-valence proxy that was just rejected.
+
+**Consumer:** `memory/retrieval.py`'s `build_memory` appends an additive
+clause to the existing familiarity line — "Chao enjoys talking with them"
+at `affinity >= 0.15`, "Chao's especially fond of them" at `>= 0.4`, nothing
+below that. This is still the *only* live consumer of affinity; nothing
+gates on it, and nothing may — `_TAG_TO_POOL["affection"]` firing
+`heart_bub` unconditionally is untouched and must stay that way regardless
+of what this system does.
+
+**396 tests passing (was 388, +8):** `touch_viewer`'s `affinity_delta`
+insert/update/clamp/no-delta-leaves-it-alone behavior (`test_memory_store.py`),
+`build_memory`'s three affinity tiers (`test_memory_retrieval.py`), and
+`_run_memory_writer`'s priority-tier-to-delta wiring end to end over a real
+`Bus` (`test_main.py`). `ruff check`/`ruff format --check` clean. Committed
+as `43af053`, on top of slice 1's `b9b5b16`.
+
+**Still true from part 3, still not done:** none of phase 6 (slice 1 or
+this affinity addition) has been live-verified against the real running
+app yet — only unit tests and one standalone `asyncio.run` smoke script
+outside pytest. That is the very next step, before anything else. Also
+still open: `episodes` has no pruning policy (now more pressing, not less,
+since affinity + episodes together make this slice fully real rather than
+scaffolding), and reflection/`beliefs`/`episode_vec` remain out of scope
+per the ordered build plan.
+
+**Next session starts with:** restart the app, chat as a returning/engaged
+viewer (send a couple of direct mentions or questions across more than one
+UTC day if possible, to actually move `days_seen` and `affinity` off their
+starting values), confirm the familiarity + affinity clauses show up
+correctly in what chao actually says, and inspect `data/chao.db` directly
+(`sqlite3 data/chao.db "select * from viewers"` /
+`"select * from episodes"`) to sanity-check the stored rows match what the
+app did. Only after that holds up should `episodes` pruning or
+reflection/`beliefs` be picked up next.
+
 ## Stopping point (session 12 part 3, 2026-08-17): phase 6 slice 1 built — viewers + episodes
 
 Built the first real slice of phase 6 memory (design doc §4.4), per the plan
@@ -17,13 +84,22 @@ both times confirmed the resolution rather than requiring a new one; see
 below for the actual answer.
 
 **Schema deviates from §4.4 on purpose, not by accident** (`memory/store.py`):
-`viewers` + `episodes` only. No `sessions` (nothing consumes it) and no
-`viewers.affinity` column (session 11/12: affinity is a *label* derived at
-read time from `interactions`/`days_seen`, not a tuned scalar — storing one
-would invite re-deriving the threshold problem the de-gating decision
-removed). `beliefs`/`episode_vec` stay out of scope per the ordered build
-plan. `episodes.importance` is a constant `0.5` placeholder — nothing reads
-it yet; real scoring is reflection's job, not this slice's.
+`viewers` + `episodes` only. No `sessions` (nothing consumes it).
+`beliefs`/`episode_vec` stay out of scope per the ordered build plan.
+`episodes.importance` is a constant `0.5` placeholder — nothing reads it
+yet; real scoring is reflection's job, not this slice's.
+
+**CORRECTION, session 12 part 4 — the line originally here was wrong and
+has been removed, not just amended:** it claimed dropping
+`viewers.affinity` entirely was the resolved decision ("affinity is a
+*label* derived at read time... storing one would invite re-deriving the
+threshold problem"). The user corrected this: de-gating heart (session 11)
+only meant heart no longer needs a threshold to cross, not that affinity
+should stop existing as a tracked signal. `viewers.affinity` is back as of
+part 4 below — see that entry for the real, current design. Left this
+correction note in place rather than silently rewriting history, per
+advisor's explicit flag that a stale resolved-decision claim in this file
+is worse than an admitted reversal.
 
 **Writer concurrency:** one `sqlite3` connection (`check_same_thread=False`),
 guarded by a single `asyncio.Lock`, every call routed through
