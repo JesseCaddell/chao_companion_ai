@@ -4,6 +4,113 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
+## Stopping point (session 12 part 3, 2026-08-17): phase 6 slice 1 built — viewers + episodes
+
+Built the first real slice of phase 6 memory (design doc §4.4), per the plan
+recorded below and the user's explicit scope call (`viewers` + `episodes`
+together, not `viewers` alone, so the first payoff is chao referencing
+something actually said, not just a visit count). Went to `advisor` twice
+before writing code — once for the overall implementation plan, once when a
+new design wrinkle came up (how retrieval reconciles "surface real episode
+content" against the invariant-6 laundering question flagged in part 1) —
+both times confirmed the resolution rather than requiring a new one; see
+below for the actual answer.
+
+**Schema deviates from §4.4 on purpose, not by accident** (`memory/store.py`):
+`viewers` + `episodes` only. No `sessions` (nothing consumes it) and no
+`viewers.affinity` column (session 11/12: affinity is a *label* derived at
+read time from `interactions`/`days_seen`, not a tuned scalar — storing one
+would invite re-deriving the threshold problem the de-gating decision
+removed). `beliefs`/`episode_vec` stay out of scope per the ordered build
+plan. `episodes.importance` is a constant `0.5` placeholder — nothing reads
+it yet; real scoring is reflection's job, not this slice's.
+
+**Writer concurrency:** one `sqlite3` connection (`check_same_thread=False`),
+guarded by a single `asyncio.Lock`, every call routed through
+`asyncio.to_thread` — the smallest thing that can't block the event loop
+without spawning a thread of its own (CLAUDE.md's "no threads except where
+forced").
+
+**`viewers.days_seen` is a new column beyond §4.4**, added specifically to
+close a flood vector `advisor` flagged: bucketing the familiarity label on
+raw `interactions` would let a single-session message flood move someone
+from "new here" to "a regular" in minutes. `days_seen` only increments the
+first time a given UTC calendar day sees that login, so the label can only
+move as fast as real elapsed days.
+
+**The invariant-6 laundering question (flagged open in part 1) is now
+resolved, not just decided-in-principle:** retrieved episode content does
+NOT fold into `memory`/`Prompt.dynamic` (which lands in the trusted, unwrapped
+system prompt) — advisor's correction to my first instinct. It goes into the
+`messages` list instead, as ordinary wrapped `Turn`s, using the *same*
+trust-boundary wrapper live chat already uses. `prompt.py`'s `_wrap_event`
+logic was extracted into a new public `wrap_untrusted(text, *, source,
+speaker)` so `memory/retrieval.py` can wrap retrieved episodes identically —
+one implementation, two callers, no drift possible between them. `memory`
+itself now carries only a short familiarity line built from `login`
+(Twitch-constrained to `[a-z0-9_]`) and integers — safe to fold in unwrapped
+because there's no attacker-controlled text in it at all, not because it's
+labelled. `turn.py`'s `_login_from` helper exists specifically to make sure
+`display_name` (arbitrary, attacker-controlled) never takes that path by
+mistake.
+
+**Verification matches what advisor said this design was actually for:**
+`tests/test_memory_retrieval.py::test_build_memory_neutralizes_a_forged_trust_boundary_in_stored_episode_content`
+is the two-hop version of part 1's injection tests — a chat message
+containing a literal `</message>` is stored verbatim (storage isn't the
+trust boundary) and confirmed to still arrive escaped and
+`trust="untrusted"`-labelled after a full round trip through SQLite and
+back out through retrieval.
+
+**Write-path wiring** (`__main__.py`'s new `_run_memory_writer`, a plain bus
+subscriber, same shape as `_run_speech_cooldown_tracker`): `touch_viewer`
+fires for every `Kind.INPUT_CHAT`, including background-tier chat (bus.py
+fans it out even though it never wins a turn) — `interactions` should
+reflect real chat activity, not just messages that won arbitration.
+`write_episode` fires when a stashed turn's `Kind.BRAIN_COMPLETE` arrives
+with a non-empty reply; pending turns are stashed by `turn_id` in a
+capped, oldest-evicted dict (`_MEMORY_PENDING_CAP = 50`) rather than
+assumed to always resolve, since a cancelled or arbitration-losing turn
+never gets a `BRAIN_COMPLETE`. Background-tier chat is deliberately never
+stashed (it mints a `turn_id` but can never complete, so stashing it would
+just churn the cap). A write failure publishes `Kind.ERROR` instead of
+raising, matching `_drain_speech`'s own failure-handling shape.
+
+**Read-path wiring** (`brain/turn.py`): `TurnOrchestrator` gained an
+optional `memory_store: MemoryStore | None = None` — `None` preserves the
+old static-`self.memory`-string behavior untouched (existing tests/fakes
+need no database). When set, `__call__` calls `memory/retrieval.py`'s
+`build_memory` synchronously before assembling the prompt (a per-turn read
+is on the critical path, unlike a write) and prepends the retrieved turns
+ahead of real same-session history in `recent_context`.
+
+**388 tests passing (was 365, +23):** `test_memory_store.py` (8, new),
+`test_memory_retrieval.py` (10, new, including the two-hop injection test
+above), `test_main.py` (+5, `_run_memory_writer` wiring against a real
+`Bus`+`MemoryStore`: dual-tier viewer touching, episode write on
+`BRAIN_COMPLETE`, background-tier chat never stashed, pending-cap eviction,
+write failure reports `Kind.ERROR` without crashing the subscriber loop).
+`ruff check`/`ruff format --check` clean repo-wide. Also ran a standalone
+smoke script (`asyncio.run` outside pytest) confirming the whole module
+graph imports cleanly and a real SQLite round trip produces exactly the
+expected wrapped/escaped output — not live-verified against the running
+app yet, that's next.
+
+**Not done, explicitly out of scope for this slice:** reflection/`beliefs`,
+`episode_vec`/vector search, any pruning policy for `episodes` (flagged in
+part 1, still open — this slice makes the unbounded-growth concern real,
+not just theoretical, so it should move up in priority next session).
+`data/chao.db` is gitignored already (pre-existing), no new config surface
+needed — the path is `memory/store.py`'s own `DB_PATH` constant, same
+pattern as `outputs/vts.py`'s `TOKEN_PATH`.
+
+**Next: live-verify against the real app** (restart, chat as a returning
+viewer, confirm chao's reply reflects familiarity/past content, inspect
+`data/chao.db` directly) — same discipline as every other `__main__.py`
+change this session. Then, if that holds up, `beliefs`/reflection is next
+in the recorded build order, or episodes pruning if growth becomes the more
+pressing concern first.
+
 ## Stopping point (session 12 part 2, 2026-08-17): deeper prompt-injection hardening
 
 User asked to go further on injection hardening specifically: "protect our

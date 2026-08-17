@@ -1,11 +1,20 @@
 import asyncio
+from pathlib import Path
 
-from chao.__main__ import _run_mood, _select_backend, build_pipeline
+from chao.__main__ import (
+    _MEMORY_PENDING_CAP,
+    _run_memory_writer,
+    _run_mood,
+    _select_backend,
+    build_pipeline,
+)
 from chao.brain.backend import CircuitBreakerBackend
+from chao.bus import Bus
 from chao.director.aliveness import Aliveness
 from chao.director.director import EmoteConfig, EmotePool
 from chao.director.mood import Mood, MoodConfig
 from chao.events import Event, Kind
+from chao.memory.store import MemoryStore
 
 
 class FakeBackend:
@@ -208,3 +217,153 @@ async def test_run_mood_ticks_on_a_quiet_stretch_over_a_real_bus():
     assert tag_mood.payload["source"] == "tag"
     assert tick_mood.payload["source"] == "tick"
     assert tick_mood.turn_id is None
+
+
+async def _wait_until(predicate, *, timeout: float = 2.0, interval: float = 0.01):
+    async with asyncio.timeout(timeout):
+        while True:
+            result = await predicate()
+            if result:
+                return result
+            await asyncio.sleep(interval)
+
+
+async def test_memory_writer_touches_viewer_for_direct_and_background_tier_chat(tmp_path: Path):
+    """Session 12: interactions must reflect real chat activity, not just
+    messages that won turn arbitration -- background-tier chat still
+    reaches Kind.INPUT_CHAT via bus.py's fan-out even though it never
+    becomes a turn.
+    """
+    bus = Bus()
+    store = MemoryStore(tmp_path / "test.db")
+    task = asyncio.create_task(_run_memory_writer(bus, store))
+    await asyncio.sleep(0)
+
+    bus.publish(
+        Event(
+            kind=Kind.INPUT_CHAT, payload={"login": "someuser", "text": "hey chao", "priority": 1}
+        )
+    )
+    bus.publish(
+        Event(
+            kind=Kind.INPUT_CHAT,
+            payload={"login": "someuser", "text": "just chatting", "priority": 5},
+        )
+    )
+
+    summary = await _wait_until(lambda: store.viewer_summary("someuser"))
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert summary.interactions == 2
+
+
+async def test_memory_writer_writes_an_episode_on_brain_complete(tmp_path: Path):
+    bus = Bus()
+    store = MemoryStore(tmp_path / "test.db")
+    task = asyncio.create_task(_run_memory_writer(bus, store))
+    await asyncio.sleep(0)
+
+    chat = Event(
+        kind=Kind.INPUT_CHAT,
+        turn_id="t1",
+        payload={"login": "someuser", "text": "hey chao", "priority": 1},
+    )
+    bus.publish(chat)
+    await _wait_until(lambda: store.viewer_summary("someuser"))
+    bus.publish(Event(kind=Kind.BRAIN_COMPLETE, turn_id="t1", payload={"full_text": "hi there!"}))
+
+    async def episodes():
+        summary = await store.viewer_summary("someuser")
+        rows = await store.recent_episodes(summary.id, limit=5)
+        return rows or None
+
+    rows = await _wait_until(episodes)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert len(rows) == 1
+    assert rows[0].content == "hey chao"
+    assert rows[0].chao_response == "hi there!"
+
+
+async def test_memory_writer_never_stashes_background_tier_chat(tmp_path: Path):
+    """A background-tier input.chat still mints a turn_id (bus.py fans it
+    out to subscribers) but can never reach BRAIN_COMPLETE -- confirms
+    this writer doesn't stash it anyway (which would just leak the
+    pending cap on entries that can't resolve).
+    """
+    bus = Bus()
+    store = MemoryStore(tmp_path / "test.db")
+    task = asyncio.create_task(_run_memory_writer(bus, store))
+    await asyncio.sleep(0)
+
+    chat = Event(
+        kind=Kind.INPUT_CHAT,
+        turn_id="t1",
+        payload={"login": "someuser", "text": "spam", "priority": 5},
+    )
+    bus.publish(chat)
+    await _wait_until(lambda: store.viewer_summary("someuser"))
+    # Simulate a (real, in the app, impossible) BRAIN_COMPLETE for that
+    # turn_id -- if it had been stashed, this would write an episode.
+    bus.publish(Event(kind=Kind.BRAIN_COMPLETE, turn_id="t1", payload={"full_text": "reply"}))
+    await asyncio.sleep(0.05)
+
+    summary = await store.viewer_summary("someuser")
+    rows = await store.recent_episodes(summary.id, limit=5)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert rows == []
+
+
+async def test_memory_writer_evicts_oldest_pending_entry_past_the_cap(tmp_path: Path):
+    bus = Bus()
+    store = MemoryStore(tmp_path / "test.db")
+    task = asyncio.create_task(_run_memory_writer(bus, store))
+    await asyncio.sleep(0)
+
+    for i in range(_MEMORY_PENDING_CAP + 1):
+        bus.publish(Event(kind=Kind.INPUT_MANUAL, turn_id=f"t{i}", payload={"text": f"msg {i}"}))
+    await asyncio.sleep(0.05)
+
+    # The very first stashed entry should have been evicted; completing it
+    # now must not write an episode.
+    bus.publish(Event(kind=Kind.BRAIN_COMPLETE, turn_id="t0", payload={"full_text": "reply"}))
+    # The most recent one is still pending -- completing it must succeed.
+    bus.publish(
+        Event(
+            kind=Kind.BRAIN_COMPLETE,
+            turn_id=f"t{_MEMORY_PENDING_CAP}",
+            payload={"full_text": "reply"},
+        )
+    )
+    await asyncio.sleep(0.05)
+
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    cur = store._conn.execute("SELECT content FROM episodes")
+    contents = [r[0] for r in cur.fetchall()]
+    assert contents == [f"msg {_MEMORY_PENDING_CAP}"]
+
+
+async def test_memory_writer_publishes_error_instead_of_crashing_on_write_failure(tmp_path: Path):
+    bus = Bus()
+    store = MemoryStore(tmp_path / "test.db")
+    store.close()  # forces the next write to raise
+    task = asyncio.create_task(_run_memory_writer(bus, store))
+    sub = bus.subscribe()
+    await asyncio.sleep(0)
+
+    bus.publish(
+        Event(kind=Kind.INPUT_CHAT, payload={"login": "someuser", "text": "hi", "priority": 1})
+    )
+    error = await asyncio.wait_for(_next_of_kind(sub, Kind.ERROR), timeout=2.0)
+
+    assert not task.done()  # the failure didn't crash the subscriber loop
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert "memory write failed" in error.payload["message"]

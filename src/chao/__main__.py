@@ -20,8 +20,9 @@ import asyncio
 import os
 import random
 import time
+from collections import deque
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import uvicorn
@@ -32,7 +33,7 @@ from chao.brain.backend import CircuitBreakerBackend, LLMBackend
 from chao.brain.cloud import AnthropicBackend
 from chao.brain.local import OllamaBackend, load_ollama_config
 from chao.brain.turn import TurnOrchestrator
-from chao.bus import Bus
+from chao.bus import Bus, Priority
 from chao.dashboard.server import DASHBOARD_HOST, DASHBOARD_PORT, DashboardCommands, create_app
 from chao.director.aliveness import Aliveness, Fly, FlyConfig, load_fly_config
 from chao.director.director import Director, EmoteConfig, load_emote_config
@@ -46,6 +47,7 @@ from chao.inputs.free_speech import FreeSpeech
 from chao.inputs.killswitch import KillSwitch, load_kill_switch_config
 from chao.inputs.twitch import TwitchChatClient, TwitchConfig, load_twitch_config
 from chao.inputs.voice import VoiceConfig, VoiceInput, load_voice_config
+from chao.memory.store import MemoryStore
 from chao.outputs.audio import AudioPlayer, resolve_output_device
 from chao.outputs.speech import Speaker, TTSConfig, load_tts_config
 from chao.outputs.tts import PiperBackend
@@ -85,18 +87,28 @@ def _select_backend(choice: str, cloud: LLMBackend, local: LLMBackend) -> LLMBac
 
 
 def build_pipeline(
-    *, identity: str, emote_config: EmoteConfig, backend: LLMBackend
+    *,
+    identity: str,
+    emote_config: EmoteConfig,
+    backend: LLMBackend,
+    memory_store: MemoryStore | None = None,
 ) -> tuple[Bus, TurnOrchestrator]:
     """All the wiring, dependency-injected — reused by main() with real
     backends and by tests with fakes. Callers that want TTS set
     `orchestrator.speaker` afterward (needs `bus.publish`, which doesn't
     exist until the `Bus()` constructed in here) -- same reasoning as
-    `main()`'s `_build_speaker` call below.
+    `main()`'s `_build_speaker` call below. `memory_store` defaults to
+    None so existing tests/fakes don't need a real database -- phase 6
+    memory (session 12) is additive, not required for the pipeline to work.
     """
     bus = Bus()
     director = Director(emote_config=emote_config, publish=bus.publish)
     orchestrator = TurnOrchestrator(
-        backend=backend, director=director, publish=bus.publish, identity=identity
+        backend=backend,
+        director=director,
+        publish=bus.publish,
+        identity=identity,
+        memory_store=memory_store,
     )
     return bus, orchestrator
 
@@ -481,6 +493,104 @@ async def _run_speech_cooldown_tracker(bus: Bus) -> None:
             bus.mark_speech_end(event.ts)
 
 
+_MEMORY_PENDING_CAP = 50
+
+_INPUT_KIND_TO_SOURCE: dict[str, str] = {
+    Kind.INPUT_VOICE: "voice",
+    Kind.INPUT_MANUAL: "manual",
+    Kind.INPUT_AMBIENT: "ambient",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingEpisode:
+    source: str
+    viewer_id: int | None
+    content: str
+
+
+async def _run_memory_writer(bus: Bus, store: MemoryStore) -> None:
+    """Phase 6 (design doc §4.4) write side, session 12. The read side
+    (memory/retrieval.py) runs synchronously inside `TurnOrchestrator`
+    since a per-turn read is on the critical path; a write is not, so it
+    lives here as an ordinary bus subscriber instead -- same shape as
+    `_run_speech_cooldown_tracker`.
+
+    Two independent jobs: `touch_viewer` fires for every `Kind.INPUT_CHAT`
+    (all tiers -- session 12's design pass wants `interactions` to
+    reflect real chat activity, not just messages that won turn
+    arbitration), and `write_episode` fires when a stashed turn's
+    `Kind.BRAIN_COMPLETE` arrives with a real reply.
+
+    Pending turns are stashed by `turn_id` and popped on `BRAIN_COMPLETE`;
+    a cancelled or arbitration-losing turn never gets one, so entries are
+    capped and evicted oldest-first rather than assumed to always
+    resolve. Background-tier chat is deliberately never stashed here --
+    `bus.py` mints it a `turn_id` too, but it can never reach
+    `BRAIN_COMPLETE`, so stashing it would only churn the cap for entries
+    that can't resolve. A write failure (locked DB, disk full) publishes
+    `Kind.ERROR` instead of raising -- invariant 4's shape, same as
+    `_drain_speech`'s own failure handling.
+    """
+    sub = bus.subscribe()
+    pending: dict[str, _PendingEpisode] = {}
+    pending_order: deque[str] = deque()
+
+    def stash(turn_id: str, entry: _PendingEpisode) -> None:
+        if turn_id in pending:
+            return
+        pending[turn_id] = entry
+        pending_order.append(turn_id)
+        if len(pending_order) > _MEMORY_PENDING_CAP:
+            pending.pop(pending_order.popleft(), None)
+
+    while True:
+        event = await sub.get()
+        try:
+            if event.kind == Kind.INPUT_CHAT:
+                login = event.payload.get("login")
+                viewer_id = (
+                    await store.touch_viewer(login, event.payload.get("display_name"))
+                    if login
+                    else None
+                )
+                if event.turn_id and bus.priority_of(event) != Priority.CHAT_BACKGROUND:
+                    stash(
+                        event.turn_id,
+                        _PendingEpisode(
+                            source="chat",
+                            viewer_id=viewer_id,
+                            content=event.payload.get("text", ""),
+                        ),
+                    )
+            elif event.kind in _INPUT_KIND_TO_SOURCE and event.turn_id:
+                stash(
+                    event.turn_id,
+                    _PendingEpisode(
+                        source=_INPUT_KIND_TO_SOURCE[event.kind],
+                        viewer_id=None,
+                        content=event.payload.get("text", ""),
+                    ),
+                )
+            elif event.kind == Kind.BRAIN_COMPLETE and event.turn_id:
+                entry = pending.pop(event.turn_id, None)
+                if entry is not None:
+                    try:
+                        pending_order.remove(event.turn_id)
+                    except ValueError:
+                        pass
+                    full_text = event.payload.get("full_text", "")
+                    if full_text:
+                        await store.write_episode(
+                            source=entry.source,
+                            viewer_id=entry.viewer_id,
+                            content=entry.content,
+                            chao_response=full_text,
+                        )
+        except Exception as e:  # noqa: BLE001 - a write failure reports and continues, never crashes this task
+            bus.publish(Event(kind=Kind.ERROR, payload={"message": f"memory write failed: {e}"}))
+
+
 async def _run_free_speech(bus: Bus, free_speech: FreeSpeech) -> None:
     """Session 11: polls `FreeSpeech.tick()` at 1Hz and publishes
     `input.ambient` when it fires -- the lowest-priority arbitrated input
@@ -536,9 +646,10 @@ async def main() -> None:
         think=ollama_config.think,
     )
     backend = _select_backend(llm_backend_choice, cloud, local)
+    memory_store = MemoryStore()
 
     bus, orchestrator = build_pipeline(
-        identity=identity, emote_config=emote_config, backend=backend
+        identity=identity, emote_config=emote_config, backend=backend, memory_store=memory_store
     )
     speaker = _build_speaker(tts_config, motion_config, bus.publish)
     orchestrator.speaker = speaker
@@ -629,6 +740,7 @@ async def main() -> None:
     voice_task = asyncio.create_task(_run_voice(bus, voice_config))
     speech_cooldown_task = asyncio.create_task(_run_speech_cooldown_tracker(bus))
     free_speech_task = asyncio.create_task(_run_free_speech(bus, free_speech))
+    memory_writer_task = asyncio.create_task(_run_memory_writer(bus, memory_store))
     run_task = asyncio.create_task(bus.run(orchestrator))
 
     print(
@@ -659,6 +771,7 @@ async def main() -> None:
         voice_task.cancel()
         speech_cooldown_task.cancel()
         free_speech_task.cancel()
+        memory_writer_task.cancel()
         await asyncio.gather(
             run_task,
             error_task,
@@ -671,8 +784,10 @@ async def main() -> None:
             voice_task,
             speech_cooldown_task,
             free_speech_task,
+            memory_writer_task,
             return_exceptions=True,
         )
+        memory_store.close()
 
 
 if __name__ == "__main__":

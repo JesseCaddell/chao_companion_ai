@@ -115,16 +115,27 @@ def _escape_for_delimiter(text: str) -> str:
     return text
 
 
+def wrap_untrusted(text: str, *, source: EventSource, speaker: str | None = None) -> str:
+    """The trust-boundary wrapper CLAUDE.md invariant 6 depends on --
+    public so `memory/retrieval.py` can wrap retrieved episode snippets
+    the same way `_wrap_event` wraps the live current event. Invariant 6
+    applies to chat-derived text whether it arrives live or comes back
+    out of memory retrieval; a stored episode doesn't get to skip the
+    label just because it's on its second trip through the prompt.
+    """
+    trust = "untrusted" if source in _UNTRUSTED_SOURCES else "trusted"
+    speaker_escaped = _escape_for_delimiter(speaker) if speaker else None
+    speaker_attr = f' speaker="{speaker_escaped}"' if speaker_escaped else ""
+    text_escaped = _escape_for_delimiter(text)
+    return f'<message source="{source}" trust="{trust}"{speaker_attr}>\n{text_escaped}\n</message>'
+
+
 def _wrap_event(event: CurrentEvent) -> str:
     """CLAUDE.md invariant 6: chat text never enters the system prompt, and
     is explicitly labelled untrusted so the model doesn't treat it as
     instructions, regardless of what config/identity.md does or doesn't say.
     """
-    trust = "untrusted" if event.source in _UNTRUSTED_SOURCES else "trusted"
-    speaker = _escape_for_delimiter(event.speaker) if event.speaker else None
-    speaker_attr = f' speaker="{speaker}"' if speaker else ""
-    text = _escape_for_delimiter(event.text)
-    return f'<message source="{event.source}" trust="{trust}"{speaker_attr}>\n{text}\n</message>'
+    return wrap_untrusted(event.text, source=event.source, speaker=event.speaker)
 
 
 def _cap_memory(memory: str, budget: int) -> str:

@@ -26,6 +26,8 @@ from chao.brain.backend import LLMBackend
 from chao.brain.prompt import CurrentEvent, EventSource, Prompt, Turn, assemble_prompt
 from chao.director.director import Director
 from chao.events import Event, Kind
+from chao.memory.retrieval import build_memory
+from chao.memory.store import MemoryStore
 from chao.outputs.speech import Speaker
 
 _SOURCE_BY_KIND: dict[str, EventSource] = {
@@ -43,7 +45,13 @@ class TurnOrchestrator:
     publish: Callable[[Event], None]
     identity: str = ""
     personality: str = ""
+    # Static fallback, used verbatim when memory_store is None (tests,
+    # or a run with phase 6 memory not configured). Once a store is
+    # wired, retrieval.build_memory owns this per turn instead -- an
+    # empty result for a first-time chatter is correct, not a bug (see
+    # prompt.py's own "omitted, not padded" rule for empty sections).
     memory: str = ""
+    memory_store: MemoryStore | None = None
     # None means TTS isn't configured -- same graceful-degrade shape as a
     # VTS connection that never came up: the chat loop still works, it
     # just doesn't speak.
@@ -66,11 +74,21 @@ class TurnOrchestrator:
 
     async def __call__(self, event: Event, cancel: asyncio.Event, turn_id: str) -> None:
         current_event = _current_event_from(event)
+        memory_text = self.memory
+        retrieved_turns: list[Turn] = []
+        if self.memory_store is not None:
+            memory_text, retrieved_turns = await build_memory(
+                self.memory_store, login=_login_from(event)
+            )
         prompt = assemble_prompt(
             identity=self.identity,
             personality=self.personality,
-            memory=self.memory,
-            recent_context=list(self._history),
+            memory=memory_text,
+            # Retrieved episodes first (oldest), then real same-session
+            # history -- both are Turn lists already in chronological
+            # order, retrieval's own wrapped/untrusted (memory/retrieval.py)
+            # the same way the live current event is (prompt.wrap_untrusted).
+            recent_context=[*retrieved_turns, *self._history],
             current_event=current_event,
         )
 
@@ -236,6 +254,17 @@ def _current_event_from(event: Event) -> CurrentEvent:
     if source == "chat":
         speaker = event.payload.get("display_name") or event.payload.get("login")
     return CurrentEvent(text=event.payload.get("text", ""), source=source, speaker=speaker)
+
+
+def _login_from(event: Event) -> str | None:
+    """Retrieval targets `login`, never `display_name` -- Twitch
+    constrains login to `[a-z0-9_]`, so it's safe to interpolate into
+    the trusted memory line (see memory/retrieval.py); a display name is
+    arbitrary attacker-controlled text and must not take this path.
+    """
+    if _SOURCE_BY_KIND.get(event.kind) != "chat":
+        return None
+    return event.payload.get("login")
 
 
 def _non_empty_sections(prompt: Prompt) -> list[str]:
