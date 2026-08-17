@@ -4,6 +4,144 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
+## Stopping point (session 12, 2026-08-17): Twitch hardening done, phase 6 design pass complete
+
+Picked up session 11 part 6's queued plan at item 2 (item 1, the override
+panel, finished in part 7 below). Session ends here, on the user's own
+plan: "we can end this session once the [phase 6] design is completed."
+
+**Twitch hardening — done, 3 commits:**
+
+- **Found and fixed a real prompt-injection bug first**, while rereading
+  `brain/prompt.py`'s `_wrap_event` on the way into this task (not part of
+  the original hardening list, but the same trust boundary CLAUDE.md
+  invariant 6 depends on). `_wrap_event` interpolated `event.text`/
+  `event.speaker` into the `<message source=... trust=...>` delimiter with
+  zero escaping — a chat message containing a literal `</message>` could
+  close the real delimiter early and inject a forged
+  `<message source="system" trust="trusted">` wrapper; a display name
+  containing `"` could break out of the `speaker="..."` attribute the same
+  way. Fixed with standard XML entity escaping (`_escape_for_delimiter`),
+  applied to both fields. Checked whether the fix needed to reach
+  `turn.py`'s conversation history too (a second surface `advisor` flagged)
+  — it doesn't: `turn.py:172` already stores `prompt.messages[-1].content`,
+  the *wrapped, already-escaped* text, not raw `event.text`, so the single
+  fix in `_wrap_event` covers the current turn and all future history
+  reuse of it. `advisor`'s follow-up concern about escaped-length vs.
+  token-budget accounting also turned out not to apply, for the same
+  reason (budget checks run against the already-escaped stored text on
+  every turn after the first). Two new tests in `test_brain_prompt.py`
+  confirm the forged-tag and attribute-breakout cases are neutralized.
+- **Reconnect-on-drop, in two passes.** First pass:
+  `inputs/twitch.py`'s `run()` now ends cleanly (no exception, same as a
+  graceful close) on Twitch's own `:tmi.twitch.tv RECONNECT` notice
+  (previously silently failed `parse_privmsg`'s match and kept reading a
+  socket Twitch was about to kill). `__main__.py`'s `_run_twitch` wraps
+  `client.run()` in a retry loop with capped backoff
+  (`1, 2, 5, 10, 30s`, repeating at the cap), covering RECONNECT, a
+  network blip, and an outright drop the same way; a connection that
+  stayed up 60s+ resets the backoff so a persistently broken config
+  doesn't hot-loop Twitch. Verified live against the installed
+  `websockets` 17 source (not assumed) that a real drop raises
+  `ConnectionClosedError`, not `OSError`/`RuntimeError` — the old except
+  clause never caught it, so a real drop crashed the task silently
+  (unretrieved exception) instead of the module docstring's claimed
+  graceful degrade. **Second pass, caught by `advisor` in review:** the
+  widened except clause still only covered `ConnectionClosed`, not a
+  connect-time rejection (`self._connect(url)` raising `InvalidHandshake`
+  on a bad token / 429 / maintenance) — same silent-death bug, one step
+  earlier, unexercised by any test since `FakeWebSocket` never fails to
+  connect. Confirmed via MRO that both derive from the common
+  `websockets.exceptions.WebSocketException`; widened the catch to that.
+- **No chat rate-limit backstop added, deliberately.** Checked whether
+  anything downstream of `bus.py`'s `_fan_out` does per-event work that
+  scales badly with flood volume: no SQLite/JSONL writer exists yet
+  (that's this session's phase 6 discussion, below), and the dashboard
+  already caps its feed at 200 entries client-side. Nothing measured to
+  build a limiter against — recording that as the reasoning, not leaving
+  it as a silent gap.
+- **No separate username-sanitization work needed.** `display_name` has
+  exactly one sink in the whole codebase (`turn.py:233` →
+  `CurrentEvent.speaker`), and that's now covered by the escaping fix
+  above. Traced this explicitly rather than assuming.
+
+362 tests passing (was 359 before this session; net +3: two prompt-escaping
+tests, one RECONNECT test). `ruff check`/`ruff format --check` clean on
+every commit.
+
+**Phase 6 (memory/affinity) — design pass with `advisor` complete, per
+CLAUDE.md's explicit escalation requirement for "retrieval scoring or the
+affinity function." No code this session, prep for next. The design:**
+
+The constraint that orders the whole build: `brain/turn.py`'s
+`TurnOrchestrator.memory` is already a real consumer interface — a static
+string, capped at 800 tokens by `prompt.py`'s `_cap_memory`. Phase 6's job
+is "make that string non-empty and real," not "build design doc §4.4's
+four-table schema." §4.4's own text already makes the case for scoping
+down: "Structured lookups do most of the useful work; vector search is
+garnish, not the meal."
+
+**Forced dependency order** (nothing here is a preference — each stage
+literally needs the previous one's data to exist):
+
+1. **`viewers`** first. Needs no upstream data — populate directly from
+   `Kind.INPUT_CHAT` as it arrives (login, first_seen, last_seen,
+   interactions count).
+2. **`episodes`**, plain rows, **no `episode_vec` yet**. Structured
+   episodic log: what was said, by whom, when, roughly how it felt.
+3. **Reflection / `beliefs`** third — can't run before `episodes` has
+   real data to read (§16.2: "reads recent high-importance episodes and
+   writes conclusions into beliefs"). This is also where §16.2's own
+   guardrails (cap ~50 active rows, decay unreinforced, prune below
+   threshold) need to actually be implemented, not just specified.
+4. **`episode_vec` (vector search) last, possibly not at all in v1.**
+   Two independent reasons to defer, not one: §4.4 already calls it
+   "garnish," and this session hit real, live Ollama-under-CPU-contention
+   problems (a prior-session fix) — adding a second CPU-bound embedding
+   step onto the same machine needs to earn its place, not be assumed.
+
+**Affinity is redesigned, not just left unbuilt.** This is the actual
+answer to the CLAUDE.md escalation: de-gating heart from affinity
+(session 11's decision — `[affection]` fires `heart_bub` directly now,
+`a2c8fdb`) didn't just remove a gate, it removed affinity's *only*
+consumer that needed precision. With heart gone, affinity's one remaining
+consumer is a phrase inside the retrieved memory string — "new here" /
+"familiar" / "a regular you're fond of" — which needs a *label*, not a
+tuned scalar. That deletes `HEART_THRESHOLD` and its decay-rate tuning
+from scope entirely; the update rule can be dumb (e.g. a simple bucket on
+`interactions` count plus a coarse running sentiment tally) because
+nothing binary hinges on the value anymore. Don't rebuild the old
+threshold-tuning problem by habit just because §4.4 still describes it
+that way — the design doc predates the de-gating decision.
+
+**Two things §4.4 doesn't address, still open for next session's actual
+design-before-code pass:**
+
+- **Write path is the riskier half, not the read path.** A SQLite writer
+  living as a bus subscriber (matching invariant 4's "every component
+  emits Events" shape) doing synchronous `sqlite3` calls would block the
+  event loop mid-turn. Needs a real decision next session: a dedicated
+  thread (`asyncio.to_thread`), `aiosqlite`, or batching writes between
+  turns instead of per-event. Not decided yet.
+- **Nothing prunes `episodes`.** §16.2 prunes `beliefs` explicitly; §4.4
+  says nothing about `episodes`, which grows unboundedly on a busy
+  channel. Needs a retention policy (time-based, or top-N by importance
+  per viewer) designed alongside the table, not bolted on after it's
+  already large.
+- Retrieval latency also needs to respect §12's budget explicitly in the
+  design: an indexed `viewers` login lookup is ~free, vector search is
+  not — one more reason `episode_vec` sits last in the build order above.
+
+**Explicitly declined, don't reopen without the user raising it again:**
+voice barge-in / mid-sentence interruption, `neutral` expression.
+
+**Next session starts with:** turning the ordered slice above
+(`viewers` → `episodes` → reflection/`beliefs`) into an actual
+implementation plan — table DDL, the SQLite writer's threading model, and
+what `retrieval` (the per-turn read side feeding `TurnOrchestrator.memory`)
+looks like as code. `episode_vec` stays out of scope until there's a
+concrete reason to add it.
+
 ## Stopping point (session 11 part 7, 2026-08-15): override panel done, Twitch hardening next
 
 Picked up exactly where session 11 part 6 left off. Built the rest of
