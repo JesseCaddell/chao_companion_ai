@@ -93,16 +93,38 @@ def assemble_prompt(
     return Prompt(stable=stable, dynamic=dynamic, messages=messages)
 
 
+# Standard XML entity escaping. This isn't real XML the model parses --
+# just a textual delimiter convention -- so &lt; reads to it the same as
+# any other escaped snippet it's seen constantly in training data.
+_XML_ESCAPES = (("&", "&amp;"), ("<", "&lt;"), (">", "&gt;"), ('"', "&quot;"))
+
+
+def _escape_for_delimiter(text: str) -> str:
+    """Session 11: untrusted content must not be able to forge a
+    `</message>` close tag or break out of the `speaker="..."` attribute --
+    CLAUDE.md invariant 6 ("labelled untrusted") only holds if the label
+    itself can't be spoofed by the content it's labelling. A Twitch
+    display name or message containing a literal `"` or `</message>`
+    previously could inject a fake `<message source="system" trust=
+    "trusted">` wrapper directly into the prompt, undetected -- found while
+    hardening inputs/twitch.py, but this fix lives here since the gap is in
+    how *any* event gets wrapped, not Twitch-specific parsing.
+    """
+    for char, escaped in _XML_ESCAPES:
+        text = text.replace(char, escaped)
+    return text
+
+
 def _wrap_event(event: CurrentEvent) -> str:
     """CLAUDE.md invariant 6: chat text never enters the system prompt, and
     is explicitly labelled untrusted so the model doesn't treat it as
     instructions, regardless of what config/identity.md does or doesn't say.
     """
     trust = "untrusted" if event.source in _UNTRUSTED_SOURCES else "trusted"
-    speaker_attr = f' speaker="{event.speaker}"' if event.speaker else ""
-    return (
-        f'<message source="{event.source}" trust="{trust}"{speaker_attr}>\n{event.text}\n</message>'
-    )
+    speaker = _escape_for_delimiter(event.speaker) if event.speaker else None
+    speaker_attr = f' speaker="{speaker}"' if speaker else ""
+    text = _escape_for_delimiter(event.text)
+    return f'<message source="{event.source}" trust="{trust}"{speaker_attr}>\n{text}\n</message>'
 
 
 def _cap_memory(memory: str, budget: int) -> str:
