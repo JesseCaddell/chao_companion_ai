@@ -227,7 +227,11 @@ class TurnOrchestrator:
 
 
 def _current_event_from(event: Event) -> CurrentEvent:
-    source = _SOURCE_BY_KIND.get(event.kind, "manual")
+    # Fails closed, not open: an input Kind added later and forgotten
+    # here must default to untrusted, not trusted -- CLAUDE.md invariant
+    # 6 only holds if a gap in this mapping can't silently promote
+    # something to the system prompt's trust level.
+    source = _SOURCE_BY_KIND.get(event.kind, "chat")
     speaker = None
     if source == "chat":
         speaker = event.payload.get("display_name") or event.payload.get("login")

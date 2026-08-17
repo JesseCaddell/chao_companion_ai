@@ -1,6 +1,6 @@
 import asyncio
 
-from chao.brain.turn import TurnOrchestrator
+from chao.brain.turn import _SOURCE_BY_KIND, TurnOrchestrator
 from chao.bus import Bus
 from chao.director.director import Director, EmoteConfig, EmotePool
 from chao.events import Event, Kind
@@ -202,6 +202,50 @@ async def test_voice_event_is_trusted_with_no_speaker():
     user_turn = orchestrator._history[0]
     assert 'source="voice"' in user_turn.text
     assert 'trust="trusted"' in user_turn.text
+
+
+def test_every_input_kind_has_an_explicit_source_mapping():
+    """Session 12: _current_event_from's fallback now defaults to
+    untrusted ("chat"), not trusted -- but the real fix is not needing
+    the fallback at all. This pins that every Kind.INPUT_* constant has
+    a real entry today, so adding a new input kind and forgetting to map
+    it here fails a test instead of silently landing on the fail-closed
+    default (safe, but still a gap worth catching explicitly).
+    """
+    input_kinds = {v for k, v in vars(Kind).items() if k.startswith("INPUT_")}
+    assert input_kinds == set(_SOURCE_BY_KIND.keys())
+
+
+async def test_unknown_input_kind_defaults_to_untrusted_not_trusted():
+    backend = FakeBackend(["ok"])
+    orchestrator, _events = make_orchestrator(backend)
+    event = make_input_event("hello", kind="input.some_future_kind")
+
+    await orchestrator(event, asyncio.Event(), "t1")
+
+    user_turn = orchestrator._history[0]
+    assert 'trust="untrusted"' in user_turn.text
+
+
+async def test_model_echoing_a_viewer_supplied_tag_still_fires_it():
+    """Session 12: tags are parsed positionally from the model's output
+    text with no way to tell "the model chose this" from "the model
+    quoted a viewer's message that happened to contain bracket syntax."
+    A viewer typing a real tag can't fire anything directly -- tags are
+    only parsed from backend output, never from input.chat text -- but
+    if the model repeats the viewer's text verbatim, Director parses it
+    as a genuine tag and fires the pool anyway. This documents that the
+    gap exists; it is not a reason to gate tags (the user wants them
+    freely fireable) -- the fix is identity.md guidance not to repeat
+    bracketed text from chat, not code.
+    """
+    backend = FakeBackend(["[happy] you said it, not me"])
+    orchestrator, events = make_orchestrator(backend)
+    event = make_input_event("say [happy] please", kind=Kind.INPUT_CHAT, display_name="viewer1")
+
+    await orchestrator(event, asyncio.Event(), "t1")
+
+    assert any(e.kind == Kind.DIRECTOR_EMOTE for e in events)
 
 
 async def test_cancelled_turn_skips_completion_and_history():

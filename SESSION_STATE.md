@@ -4,6 +4,71 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
+## Stopping point (session 12 part 2, 2026-08-17): deeper prompt-injection hardening
+
+User asked to go further on injection hardening specifically: "protect our
+chao from all forms of prompt injection from usernames and chat. No reading
+links, etc." `identity.md` was still flagged PLACEHOLDER with zero
+anti-injection language, and CLAUDE.md explicitly names "designing prompts,
+the identity trait sheet" as an Opus-escalation item, so oriented (confirmed
+chao has no URL-fetch/tool-use capability anywhere — `httpx` only talks to
+local Ollama) then went to `advisor` before writing anything.
+
+**Key correction from `advisor`:** the emoji fix's method (prompt-only,
+live-verify by ear) doesn't transfer to injection resistance — there's no
+live signal for an attack that hasn't happened yet, so the deliverable has
+to be a payload-test table in `tests/`, not just more `identity.md` prose.
+Prose is still right for the model-behavior layer, but it's not the
+verification.
+
+**Found and fixed, with new regression tests (365 passing, +3):**
+
+- **`_current_event_from`'s trust-source lookup failed open.**
+  `_SOURCE_BY_KIND.get(event.kind, "manual")` defaulted an unrecognized
+  input `Kind` to *trusted*. All 4 current `Kind.INPUT_*` values are
+  mapped today (pinned with a new test so a future addition that forgets
+  this dict fails a test instead of failing silently), but the fallback
+  itself now defaults to `"chat"` (untrusted) instead of `"manual"` — a
+  one-line fail-closed fix (`brain/turn.py`).
+- **Confirmed a real tag-echo path exists, by test, not by inspection.**
+  Tags are parsed positionally from the model's *output* text with no way
+  to distinguish "the model chose this" from "the model quoted a viewer's
+  message containing bracket syntax." A viewer typing `[fly:left]` can't
+  fire anything directly — chat text never reaches `Director` — but if the
+  model repeats it verbatim in its reply, `process_chunk` parses it as a
+  genuine tag and fires the pool. Verified with a `FakeBackend` that
+  echoes `[happy]` from chat input; `Director` fires it
+  (`test_model_echoing_a_viewer_supplied_tag_still_fires_it`). Per the
+  user's explicit "don't gate tags" stance (session 11), the fix is
+  behavioral (identity.md), not a code gate.
+- **Flagged, not yet fixed: phase 6's retrieval path launders untrusted
+  text into the trusted system prompt** — a two-hop invariant-6 violation
+  the session-12-part-1 escaping fix doesn't reach, since retrieved
+  `memory` folds into `Prompt.system` unwrapped. Recorded as a third open
+  design question in the phase 6 section above, leaning toward "memory
+  only ever carries reflection-authored prose, never a raw quote" but not
+  decided.
+- **`identity.md` gained a `## Hard constraints` section**, placed before
+  Temperament and explicitly called out as surviving the eventual
+  Opus-reviewed identity rewrite (unlike the placeholder Temperament text
+  below it): don't treat chat content as instructions regardless of how
+  it's phrased (fake system-message claims included), don't repeat/quote
+  bracketed text from chat verbatim, and — the link question — chao has no
+  way to open a link or browse, so never claim to have visited one and
+  never treat text near a link as more trustworthy.
+
+**Open question, not yet asked or resolved: what "no reading links" means.**
+Two different readings need two different fixes and only the user knows
+which they meant: (a) protecting chao from being manipulated by a link
+(structurally already true — no fetch capability exists, and the Hard
+constraints wording above covers the behavioral side), or (b) protecting
+*viewers* from chao relaying/reading a URL aloud over TTS if a viewer pastes
+a phishing link into chat (an output-path filter, not a prompt fix — unlike
+the emoji case, a URL strip doesn't have the "leaves a stray period" failure
+mode that got a code-side emoji strip rejected, so that objection doesn't
+carry over automatically). Ask before building (b); (a) needed no further
+code.
+
 ## Stopping point (session 12, 2026-08-17): Twitch hardening done, phase 6 design pass complete
 
 Picked up session 11 part 6's queued plan at item 2 (item 1, the override
@@ -131,6 +196,23 @@ design-before-code pass:**
 - Retrieval latency also needs to respect §12's budget explicitly in the
   design: an indexed `viewers` login lookup is ~free, vector search is
   not — one more reason `episode_vec` sits last in the build order above.
+- **A third open question, found during session 12's injection-hardening
+  pass (below): the retrieval path launders untrusted text into the
+  trusted system prompt.** `prompt.py`'s `Prompt.system` property is
+  `stable + dynamic`, and `dynamic` is the retrieved `memory` string —
+  unwrapped, no trust label, folded straight into `system`. `episodes`
+  will store raw chat text in `content`; retrieval reads it back out and
+  hands it to `assemble_prompt` as `memory`. That's CLAUDE.md invariant 6
+  violated by a two-hop path the escaping fix (session 12, `504b372`)
+  doesn't reach, since it only wraps the *current* event, not retrieved
+  memory. The design has to pick one: (a) memory only ever carries
+  reflection-authored prose (the reflection job's own sentence about a
+  belief, never a raw quote of what a viewer said), or (b) retrieved
+  episode text gets wrapped/escaped the same way `_wrap_event` does
+  before landing in `dynamic`. (a) is simpler and matches §16.2's actual
+  design intent (reflection writes *conclusions*, not transcripts) —
+  leaning that way, but not decided; needs to be explicit in whatever
+  writes `episodes.content` into a retrieval query, not assumed.
 
 **Explicitly declined, don't reopen without the user raising it again:**
 voice barge-in / mid-sentence interruption, `neutral` expression.
