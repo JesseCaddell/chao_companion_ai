@@ -19,11 +19,13 @@ from __future__ import annotations
 import asyncio
 import os
 import random
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
 import uvicorn
+import websockets
 from dotenv import load_dotenv
 
 from chao.brain.backend import CircuitBreakerBackend, LLMBackend
@@ -357,12 +359,26 @@ async def _run_fly(bus: Bus, fly_config: FlyConfig) -> None:
         fly.handle(event)
 
 
+# Session 11 hardening: capped backoff after a dropped Twitch connection
+# (network blip, Twitch's own RECONNECT notice, or an outright connection
+# failure -- inputs/twitch.py's run() ends normally or raises for all
+# three, so one retry loop here covers all of them). A connection that
+# stayed up at least _TWITCH_STABLE_CONNECTION_S resets the backoff, so a
+# transient blip recovers in ~1s while a persistently broken config (dead
+# channel, bad token) settles at the cap instead of hot-looping Twitch.
+_TWITCH_RECONNECT_BACKOFF_S: tuple[float, ...] = (1.0, 2.0, 5.0, 10.0, 30.0)
+_TWITCH_STABLE_CONNECTION_S = 60.0
+
+
 async def _run_twitch(bus: Bus, twitch_config: TwitchConfig) -> None:
     """Connects to real Twitch IRC and publishes `input.chat` events.
-    Degrades gracefully (prints and returns), same shape as
-    `_run_vts_subscriber`'s "VTS unavailable" handling, for: no channel
-    configured, a connection failure, or the connection dropping later
-    (no reconnect loop -- see inputs/twitch.py's docstring).
+    Degrades gracefully (prints and retries with backoff), same
+    print-and-continue shape as `_run_vts_subscriber`'s "VTS unavailable"
+    handling, for: no channel configured (returns, nothing to retry), or
+    a connection failure/drop (retries with backoff -- see
+    _TWITCH_RECONNECT_BACKOFF_S above). Only stops when this task itself
+    is cancelled at shutdown, same as every other background task in
+    this file.
 
     `TWITCH_CHANNEL` in the environment overrides `twitch.channel` in
     `config/chao.yaml` -- the channel is instance-specific (whose stream
@@ -397,10 +413,19 @@ async def _run_twitch(bus: Bus, twitch_config: TwitchConfig) -> None:
         oauth_token=oauth_token,
         bot_username=os.environ.get("TWITCH_BOT_USERNAME"),
     )
-    try:
-        await client.run()
-    except (OSError, RuntimeError) as e:
-        print(f"  (Twitch chat unavailable: {e})")
+    attempt = 0
+    while True:
+        started = time.monotonic()
+        try:
+            await client.run()
+            print("  (Twitch connection cycled by the server, reconnecting)")
+        except (OSError, RuntimeError, websockets.exceptions.ConnectionClosed) as e:
+            print(f"  (Twitch chat dropped: {e} -- reconnecting)")
+        if time.monotonic() - started >= _TWITCH_STABLE_CONNECTION_S:
+            attempt = 0
+        delay = _TWITCH_RECONNECT_BACKOFF_S[min(attempt, len(_TWITCH_RECONNECT_BACKOFF_S) - 1)]
+        attempt += 1
+        await asyncio.sleep(delay)
 
 
 async def _run_voice(bus: Bus, voice_config: VoiceConfig) -> None:

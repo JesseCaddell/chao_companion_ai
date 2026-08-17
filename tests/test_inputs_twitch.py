@@ -290,6 +290,29 @@ async def test_run_closes_the_websocket_even_if_a_line_handler_raises():
     assert ws.closed is True
 
 
+async def test_run_ends_cleanly_on_a_reconnect_notice_without_raising():
+    """Session 11: Twitch's `:tmi.twitch.tv RECONNECT` used to fail
+    parse_privmsg's match and get silently ignored, leaving the client
+    reading a socket Twitch was about to kill. It must now end `run()`
+    the same way a graceful close does -- no exception, socket closed --
+    so the caller's retry loop (in __main__.py) reconnects immediately.
+    """
+    client, ws, events = make_client(
+        [
+            welcome(),
+            privmsg("alice", "hi"),
+            ":tmi.twitch.tv RECONNECT",
+            privmsg("bob", "never seen"),
+        ]
+    )
+
+    await client.run()  # must not raise
+
+    assert ws.closed is True
+    logins = [e.payload["login"] for e in events if e.kind == Kind.INPUT_CHAT]
+    assert logins == ["alice"]
+
+
 async def test_run_upgrades_background_message_to_spike_tier_during_a_spike():
     class AlwaysSpiking:
         def record_and_check_spike(self) -> bool:

@@ -19,11 +19,13 @@ THEN wait for the server's 001 welcome line before JOINing -- joining
 before 001 can be silently ignored. The PRIVMSG regex below was likewise
 checked against real captured traffic, not hand-written blind.
 
-No reconnect-on-drop logic -- if the connection dies (network blip,
-Twitch's own RECONNECT notice), this task ends and chat input goes quiet
-until the app restarts, same degrade-not-crash shape as
-`_run_vts_subscriber`'s "VTS unavailable" handling elsewhere. Automatic
-reconnection is a reasonable hardening follow-up, not attempted this pass.
+Session 11 hardening: Twitch's own `RECONNECT` notice is now handled here
+(`run()` ends the connection cleanly instead of silently dropping the
+line and reading a now-dead socket). Reconnect-with-backoff after *any*
+drop -- this notice, a network blip, or an outright connection failure --
+lives in `__main__.py`'s `_run_twitch`, one layer up, so it can use the
+same print-and-continue degrade shape as everywhere else in that file
+instead of importing that concern in here.
 """
 
 from __future__ import annotations
@@ -48,6 +50,11 @@ IRC_URL = "wss://irc-ws.chat.twitch.tv:443"
 # hand-written blind -- both the tag block and the login/PRIVMSG shape
 # match what a live, busy channel actually sends.
 _PRIVMSG_RE = re.compile(r"^(?:@(?P<tags>\S+) )?:(?P<login>[^!]+)!\S+ PRIVMSG #\S+ :(?P<text>.*)$")
+
+# Exact wire format per Twitch's IRC docs -- unlike PRIVMSG this has no
+# variable fields to parse, so a straight equality check (same style as
+# the handshake's `" 001 " in line` check) is enough.
+_RECONNECT_LINE = ":tmi.twitch.tv RECONNECT"
 
 
 def parse_tags(raw: str | None) -> dict[str, str]:
@@ -142,6 +149,17 @@ def load_twitch_config(path: Path) -> TwitchConfig:
     )
 
 
+class _ReconnectRequested(Exception):
+    """Internal signal only, never escapes `run()`. Twitch sends a bare
+    `:tmi.twitch.tv RECONNECT` line shortly before it cycles the server
+    out from under a connection (planned maintenance, load rebalancing) --
+    it's not an error, just an early warning to reconnect proactively
+    instead of waiting to notice the socket is dead. Raised from
+    `_handle_line` (deep inside the read loop) and caught in `run()`,
+    since that's the only place that can end the loop and close cleanly.
+    """
+
+
 class _WebSocketLike(Protocol):
     """Just the shape this client actually calls -- lets tests inject a
     fake instead of a real websocket connection, same pattern as
@@ -180,8 +198,12 @@ class TwitchChatClient:
 
     async def run(self) -> None:
         """Connects, completes the handshake, then publishes
-        `Kind.INPUT_CHAT` for every PRIVMSG until the connection drops or
-        this task is cancelled. No retry loop -- see module docstring.
+        `Kind.INPUT_CHAT` for every PRIVMSG until the connection drops,
+        Twitch sends a `RECONNECT` notice, or this task is cancelled. No
+        retry loop of its own -- see module docstring, that lives one
+        layer up in `__main__.py`. A `RECONNECT` notice ends this method
+        the same way a clean connection close would (no exception); a
+        real drop (network failure) still raises, same as before.
         """
         self._ws = await self._connect(self.url)
         try:
@@ -190,6 +212,8 @@ class TwitchChatClient:
                 for line in raw.split("\r\n"):
                     if line:
                         await self._handle_line(line)
+        except _ReconnectRequested:
+            pass
         finally:
             await self._ws.close()
 
@@ -218,6 +242,8 @@ class TwitchChatClient:
         if line.startswith("PING"):
             await self._ws.send(line.replace("PING", "PONG", 1) + "\r\n")
             return
+        if line == _RECONNECT_LINE:
+            raise _ReconnectRequested()
 
         parsed = parse_privmsg(line)
         if parsed is None:
