@@ -31,11 +31,11 @@ from chao.brain.cloud import AnthropicBackend
 from chao.brain.local import OllamaBackend, load_ollama_config
 from chao.brain.turn import TurnOrchestrator
 from chao.bus import Bus
-from chao.dashboard.server import DASHBOARD_HOST, DASHBOARD_PORT, create_app
+from chao.dashboard.server import DASHBOARD_HOST, DASHBOARD_PORT, DashboardCommands, create_app
 from chao.director.aliveness import Aliveness, Fly, FlyConfig, load_fly_config
 from chao.director.director import Director, EmoteConfig, load_emote_config
 from chao.director.idle_drift import IdleDrift, IdleDriftConfig, load_idle_drift_config
-from chao.director.mood import Mood, MoodConfig, load_mood_config
+from chao.director.mood import Mood, load_mood_config
 from chao.director.motion import MotionConfig, load_motion_config
 from chao.events import Event, Kind
 from chao.inputs.free_speech import MIN_INTERVAL_S as FREE_SPEECH_MIN_INTERVAL_S
@@ -134,19 +134,14 @@ async def _print_errors(sub: asyncio.Queue[Event]) -> None:
             print(f"  !! error: {event.payload.get('message')}")
 
 
-async def _run_dashboard_server(
-    bus: Bus,
-    *,
-    set_backend: Callable[[str], None] | None = None,
-    set_free_speech: Callable[[bool, float], None] | None = None,
-) -> None:
+async def _run_dashboard_server(bus: Bus, commands: DashboardCommands | None = None) -> None:
     """Runs uvicorn in-process (not `uvicorn.run`, which calls `asyncio.run`
     and would fight the loop `main()` already owns) since the dashboard's
     websocket subscribes to the same in-memory `Bus` the rest of the app
     uses — it isn't a separate process or network service.
     """
     config = uvicorn.Config(
-        create_app(bus, set_backend=set_backend, set_free_speech=set_free_speech),
+        create_app(bus, commands),
         host=DASHBOARD_HOST,
         port=DASHBOARD_PORT,
         log_level="warning",
@@ -323,7 +318,7 @@ async def _run_aliveness(bus: Bus, emote_config: EmoteConfig) -> None:
         aliveness.handle(event)
 
 
-async def _run_mood(bus: Bus, mood_config: MoodConfig) -> None:
+async def _run_mood(bus: Bus, mood: Mood) -> None:
     """Runs mood.py's tag-driven valence/arousal tracking (design doc §6,
     §10), plus session 9's minimal timescale loop: `sub.get()` is wrapped
     in `asyncio.wait_for` with `tick_interval_s` as the timeout, so a quiet
@@ -332,12 +327,17 @@ async def _run_mood(bus: Bus, mood_config: MoodConfig) -> None:
     `Mood` instance, and safe: `Mood`'s methods are synchronous (no
     internal awaits), so there's no interleaving to worry about even if
     there were two callers.
+
+    Session 11: takes a pre-constructed `Mood`, not a `MoodConfig`, same
+    shape as `_run_free_speech` taking a `FreeSpeech` -- `main()` now needs
+    the same `Mood` instance for the dashboard's "force a mood" override
+    command, so it has to be constructed at `main()`'s level, not buried
+    inside this function.
     """
-    mood = Mood(config=mood_config, publish=bus.publish)
     sub = bus.subscribe()
     while True:
         try:
-            event = await asyncio.wait_for(sub.get(), timeout=mood_config.tick_interval_s)
+            event = await asyncio.wait_for(sub.get(), timeout=mood.config.tick_interval_s)
         except TimeoutError:
             mood.tick()
             continue
@@ -533,6 +533,51 @@ async def main() -> None:
         free_speech.enabled = enabled
         free_speech.interval_s = max(interval_s, FREE_SPEECH_MIN_INTERVAL_S)
 
+    # Session 11 part 6: the rest of design doc §11.2 item 8 (the
+    # "override panel"). `mood` is constructed here, not inside
+    # `_run_mood`, so `_force_mood` below can reach the same instance
+    # `_run_mood`'s loop is ticking/decaying -- same promotion `free_speech`
+    # already got for the same reason.
+    mood = Mood(config=mood_config, publish=bus.publish)
+
+    def _fire_emote(pool_name: str) -> None:
+        pool = emote_config.pools.get(pool_name)
+        if pool is None or not pool.hotkeys:
+            return
+        bus.publish(
+            Event(
+                kind=Kind.DIRECTOR_EMOTE,
+                payload={
+                    "pool": pool_name,
+                    "hotkey_id": random.choice(pool.hotkeys),
+                    "reason": "manual",
+                },
+            )
+        )
+
+    def _force_mood(valence: float, arousal: float) -> None:
+        mood.valence = max(-1.0, min(1.0, valence))
+        mood.arousal = max(-1.0, min(1.0, arousal))
+        bus.publish(
+            Event(
+                kind=Kind.DIRECTOR_MOOD,
+                payload={
+                    "valence": mood.valence,
+                    "arousal": mood.arousal,
+                    "baseline_valence": mood_config.baseline_valence,
+                    "baseline_arousal": mood_config.baseline_arousal,
+                    "source": "manual",
+                },
+            )
+        )
+
+    dashboard_commands = DashboardCommands(
+        set_backend=_set_backend,
+        set_free_speech=_set_free_speech,
+        fire_emote=_fire_emote,
+        force_mood=_force_mood,
+    )
+
     # Started before any input source (stdin, later Twitch) so the kill
     # switch is live from the first possible moment, not an afterthought
     # wired in after other tasks. start() must run inside the loop it's
@@ -542,16 +587,14 @@ async def main() -> None:
     kill_switch.start()
 
     error_task = asyncio.create_task(_print_errors(bus.subscribe()))
-    dashboard_task = asyncio.create_task(
-        _run_dashboard_server(bus, set_backend=_set_backend, set_free_speech=_set_free_speech)
-    )
+    dashboard_task = asyncio.create_task(_run_dashboard_server(bus, dashboard_commands))
     vts_task = asyncio.create_task(
         _run_vts_subscriber(
             bus, emote_config, fly_config, speaker, motion_config, idle_drift_config
         )
     )
     aliveness_task = asyncio.create_task(_run_aliveness(bus, emote_config))
-    mood_task = asyncio.create_task(_run_mood(bus, mood_config))
+    mood_task = asyncio.create_task(_run_mood(bus, mood))
     fly_task = asyncio.create_task(_run_fly(bus, fly_config))
     twitch_task = asyncio.create_task(_run_twitch(bus, twitch_config))
     voice_task = asyncio.create_task(_run_voice(bus, voice_config))

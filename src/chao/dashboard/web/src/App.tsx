@@ -18,6 +18,35 @@ const MAX_ENTRIES = 200
 // silently does something other than what it displays.
 const MIN_FREE_SPEECH_INTERVAL_S = 15
 const DEFAULT_FREE_SPEECH_INTERVAL_S = 90
+// config/emotes.yaml's real pool names -- offered as autocomplete only,
+// not validated client-side. The server silently no-ops an unknown pool
+// (director.py's own `_fire_pool` does the same for a bad tag), so a typo
+// here fails the same safe way a bad tag would.
+const EMOTE_POOLS = [
+  'happy_eyes',
+  'sad_eyes',
+  'angry_eyes',
+  'confused_eyes',
+  'question_bub',
+  'surprise_bub',
+  'confused_bub',
+  'heart_bub',
+]
+
+// Force-mood presets: raw valence/arousal number inputs turned out to be
+// unintuitive for a quick check, so these are fixed target points instead
+// of free-form values. happy/sad/angry/confused reuse mood.py's own
+// _TAG_DELTAS numbers (there they're deltas added to whatever the point
+// currently is; here they're absolute targets -- close enough in spirit
+// since they're the same "shape" per emotion). reset mirrors
+// config/emotes.yaml's mood.baseline_valence/baseline_arousal.
+const MOOD_PRESETS: Record<string, [number, number]> = {
+  happy: [0.7, 0.6],
+  sad: [-0.7, -0.4],
+  angry: [-0.6, 0.8],
+  confused: [-0.2, 0.4],
+  reset: [0.2, 0.3],
+}
 
 function summarize(event: ChaoEvent): string {
   const p = event.payload
@@ -63,6 +92,11 @@ export default function App() {
   const [backend, setBackend] = useState<'auto' | 'cloud' | 'local'>('auto')
   const [freeSpeechEnabled, setFreeSpeechEnabled] = useState(false)
   const [freeSpeechInterval, setFreeSpeechInterval] = useState(DEFAULT_FREE_SPEECH_INTERVAL_S)
+  // Session 11 part 6: the rest of the override panel (design doc §11.2
+  // item 8). Each field is local, uncontrolled-in-spirit form state --
+  // cleared after sending, since these are one-shot actions, not settings
+  // that persist like backend/free-speech above.
+  const [emotePool, setEmotePool] = useState('')
   const wsRef = useRef<WebSocket | null>(null)
 
   useEffect(() => {
@@ -116,6 +150,24 @@ export default function App() {
     sendCommand({ type: 'set_free_speech', enabled, interval_s: intervalS })
   }
 
+  function handleFireEmote() {
+    if (!emotePool.trim()) return
+    sendCommand({ type: 'fire_emote', pool: emotePool.trim() })
+  }
+
+  function handleForceMoodPreset(preset: string) {
+    const [valence, arousal] = MOOD_PRESETS[preset]
+    sendCommand({ type: 'force_mood', valence, arousal })
+  }
+
+  function handleKill() {
+    sendCommand({ type: 'kill' })
+  }
+
+  function handleRevive() {
+    sendCommand({ type: 'revive' })
+  }
+
   return (
     <div className="dashboard">
       <header className="dashboard-header">
@@ -155,6 +207,40 @@ export default function App() {
           />
           s
         </label>
+      </div>
+
+      <div className="overrides">
+        <div className="override">
+          <input
+            list="emote-pools"
+            placeholder="pool, e.g. happy_eyes"
+            value={emotePool}
+            onChange={(e) => setEmotePool(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleFireEmote()}
+          />
+          <datalist id="emote-pools">
+            {EMOTE_POOLS.map((pool) => (
+              <option value={pool} key={pool} />
+            ))}
+          </datalist>
+          <button onClick={handleFireEmote}>Fire emote</button>
+        </div>
+
+        <div className="override">
+          Mood
+          {Object.keys(MOOD_PRESETS).map((preset) => (
+            <button key={preset} onClick={() => handleForceMoodPreset(preset)}>
+              {preset}
+            </button>
+          ))}
+        </div>
+
+        <div className="override">
+          <button className="danger" onClick={handleKill}>
+            Kill
+          </button>
+          <button onClick={handleRevive}>Revive</button>
+        </div>
       </div>
 
       {Object.keys(params).length > 0 && (

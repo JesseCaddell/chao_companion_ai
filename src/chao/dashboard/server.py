@@ -15,15 +15,22 @@ network call.
 
 **Session 11: `/ws/events` is now bidirectional.** Design doc §11.1 always
 said "commands travel back over the same websocket as explicit messages" —
-this is that, for the first two commands with something to mutate: which
-LLM backend is live, and free speech's on/off + interval. `set_backend`/
-`set_free_speech` are optional callables `create_app` accepts and wires to
-incoming client messages; omitted (the default, and what every existing
-test/call site still passes) means commands are silently ignored rather
+this is that. `DashboardCommands` bundles every command as an optional
+callable, all defaulting to `None`; `create_app(bus)` alone (every
+pre-session-11 call site) means every command is silently ignored rather
 than erroring, same degrade-gracefully shape as everything else optional
 in this pipeline. The relay-from-bus loop and the receive-commands loop run
 concurrently on the one socket — `websocket.send_json`/`receive_json` are
 independent ASGI read/write channels, so this doesn't need two sockets.
+
+**Session 11 part 6: the rest of design doc §11.2 item 8 (the "override
+panel").** `fire_emote`/`force_mood` round out the panel; `kill`/`revive`
+don't need their own callable slots since `bus.kill()`/`bus.revive()` are
+already public methods on the `bus` this module already has in scope.
+Design doc §11.2 item 8 also names "inject a fake chat message" and
+"force a response" -- built, then removed same-session on the user's own
+call: real Twitch chat and voice already cover both in actual use, and a
+dashboard-typed substitute wasn't worth the surface area.
 
 Also serves the built frontend (`web/dist/`, via `npm run build`) as static
 files, so `chao.dashboard.window`'s native window (design doc §11.4) has a
@@ -41,7 +48,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -61,35 +68,58 @@ DASHBOARD_PORT = 8765
 _VALID_BACKENDS = frozenset({"cloud", "local", "auto"})
 
 
-def _handle_command(
-    message: dict[str, Any],
-    *,
-    set_backend: Callable[[str], None] | None,
-    set_free_speech: Callable[[bool, float], None] | None,
-) -> None:
+@dataclass(frozen=True, slots=True)
+class DashboardCommands:
+    """One optional callable per command the dashboard's override panel
+    (design doc §11.2 item 8) can issue. Every field defaults to `None` --
+    `create_app(bus)` with no `DashboardCommands` at all (every
+    pre-session-11 call site, and every test that doesn't care about
+    commands) means every command is silently ignored, not an error.
+    `kill`/`revive` aren't here: `bus.kill()`/`bus.revive()` are already
+    public and `_handle_command` already has `bus` in scope.
+    """
+
+    set_backend: Callable[[str], None] | None = None
+    set_free_speech: Callable[[bool, float], None] | None = None
+    fire_emote: Callable[[str], None] | None = None
+    force_mood: Callable[[float, float], None] | None = None
+
+
+def _handle_command(message: dict[str, Any], bus: Bus, commands: DashboardCommands) -> None:
     """Tolerant parser, same spirit as director/tags.py's tag parser -- a
     malformed or unrecognized message from the client must never crash the
     websocket handler, just get dropped silently.
     """
     msg_type = message.get("type")
-    if msg_type == "set_backend" and set_backend is not None:
+    if msg_type == "set_backend" and commands.set_backend is not None:
         backend = message.get("backend")
         if backend in _VALID_BACKENDS:
-            set_backend(backend)
-    elif msg_type == "set_free_speech" and set_free_speech is not None:
+            commands.set_backend(backend)
+    elif msg_type == "set_free_speech" and commands.set_free_speech is not None:
         try:
             interval_s = float(message.get("interval_s", 0))
         except (TypeError, ValueError):
             return
-        set_free_speech(bool(message.get("enabled", False)), interval_s)
+        commands.set_free_speech(bool(message.get("enabled", False)), interval_s)
+    elif msg_type == "fire_emote" and commands.fire_emote is not None:
+        pool = message.get("pool")
+        if isinstance(pool, str) and pool:
+            commands.fire_emote(pool)
+    elif msg_type == "force_mood" and commands.force_mood is not None:
+        try:
+            valence = float(message.get("valence", 0))
+            arousal = float(message.get("arousal", 0))
+        except (TypeError, ValueError):
+            return
+        commands.force_mood(valence, arousal)
+    elif msg_type == "kill":
+        bus.kill()
+    elif msg_type == "revive":
+        bus.revive()
 
 
-def create_app(
-    bus: Bus,
-    *,
-    set_backend: Callable[[str], None] | None = None,
-    set_free_speech: Callable[[bool, float], None] | None = None,
-) -> FastAPI:
+def create_app(bus: Bus, commands: DashboardCommands | None = None) -> FastAPI:
+    commands = commands or DashboardCommands()
     app = FastAPI()
     # CORS matters only for the `npm run dev` workflow (Vite's dev server
     # runs on a different port); the built frontend served below is
@@ -116,9 +146,7 @@ def create_app(
             while True:
                 message = await websocket.receive_json()
                 if isinstance(message, dict):
-                    _handle_command(
-                        message, set_backend=set_backend, set_free_speech=set_free_speech
-                    )
+                    _handle_command(message, bus, commands)
 
         relay_task = asyncio.create_task(relay())
         receive_task = asyncio.create_task(receive_commands())

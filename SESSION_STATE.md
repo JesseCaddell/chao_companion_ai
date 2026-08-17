@@ -4,6 +4,54 @@ Working notes for picking up where the last session left off. This is a progress
 log, not a spec — see `chao-companion-design-v0.2.md` for design and `CLAUDE.md`
 for standing conventions. Update this at the end of each session.
 
+## Stopping point (session 11 part 7, 2026-08-15): override panel done, Twitch hardening next
+
+Picked up exactly where session 11 part 6 left off. Built the rest of
+design doc §11.2 item 8 on top of the command channel: `dashboard/server.py`
+gained a `DashboardCommands` dataclass (replacing the old individual
+`set_backend`/`set_free_speech` kwargs on `create_app` — same
+all-optional-defaults-to-`None` shape, just bundled since the command
+count was about to triple) with `fire_emote`/`force_mood`, plus `kill`/
+`revive` handled inline (no callable needed, `bus.kill()`/`bus.revive()`
+are already public). `__main__.py` promotes `Mood` to a `main()`-level
+object (same pattern `free_speech` already got) so `_force_mood` can set
+`mood.valence`/`mood.arousal` directly on the *same* instance
+`_run_mood`'s tick loop is decaying — confirmed live, not assumed: fired
+`force_mood` for "sad" and watched real `director.mood` events show
+`source: "manual"` at the exact target values, then decay back toward
+baseline on subsequent `source: "tick"` events.
+
+**Live user feedback reshaped the panel mid-build, twice:**
+- **Raw valence/arousal number inputs for "force a mood" were confusing.**
+  Replaced with five preset buttons (happy/sad/angry/confused/reset) whose
+  values reuse `mood.py`'s own `_TAG_DELTAS` numbers (used there as
+  deltas, here as absolute targets — same "shape" per emotion) plus
+  `emotes.yaml`'s baseline for reset.
+- **"Inject a fake chat message" and "force a response" (design doc
+  §11.2 item 8's own wording) were removed outright**, not just
+  deprioritized. User's read: real Twitch chat and voice already cover
+  both in actual use; a dashboard-typed substitute isn't worth the
+  surface area. Built, then deleted the same session once live feedback
+  said so — `DashboardCommands.inject_chat`/`send_manual`, their
+  `_handle_command` branches, `__main__.py`'s `_inject_chat`/
+  `_send_manual` closures (and the now-unused `score_priority` import),
+  the frontend inputs, and their tests are all gone, not just unused.
+
+**4 tests removed, net -4** (359 passing, down from 363 — no new tests
+needed beyond what already covered `fire_emote`/`force_mood`/`kill`/
+`revive`). Frontend `npm run build`/`lint` clean. **Live-verified** via
+Chrome automation against the real running app: fired `heart_bub` via the
+emote input (confirmed `director.emote ... (manual)` in the feed) and the
+"sad" mood preset (confirmed exact `-0.7`/`-0.4` values, `source: manual`,
+then real decay back toward baseline) — user confirmed both visually on
+the VTS model too.
+
+**Next: Twitch hardening**, per the plan recorded in session 11 part 6
+below (not started) — no reconnect-on-drop, no chat rate-limit backstop,
+no username sanitization beyond `display_name`. Start by rereading
+`inputs/twitch.py`'s module docstring for what was deliberately deferred
+and why, same as that plan says.
+
 ## Stopping point (session 11 part 6, 2026-08-14): ended at usage limit — next session's plan, in order
 
 Session ended here on hitting the usage cap, not on a natural task boundary

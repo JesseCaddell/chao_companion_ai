@@ -4,7 +4,7 @@ from chao.__main__ import _run_mood, _select_backend, build_pipeline
 from chao.brain.backend import CircuitBreakerBackend
 from chao.director.aliveness import Aliveness
 from chao.director.director import EmoteConfig, EmotePool
-from chao.director.mood import MoodConfig
+from chao.director.mood import Mood, MoodConfig
 from chao.events import Event, Kind
 
 
@@ -189,9 +189,10 @@ async def test_run_mood_ticks_on_a_quiet_stretch_over_a_real_bus():
     mood_config = MoodConfig(
         baseline_valence=0.0, baseline_arousal=0.0, half_life_s=0.05, tick_interval_s=0.05
     )
+    mood = Mood(config=mood_config, publish=bus.publish)
 
     sub = bus.subscribe()
-    task = asyncio.create_task(_run_mood(bus, mood_config))
+    task = asyncio.create_task(_run_mood(bus, mood))
     await asyncio.sleep(0)  # let _run_mood reach its own bus.subscribe() before publishing
 
     bus.publish(Event(kind=Kind.DIRECTOR_TAG, turn_id="t1", payload={"tag": "angry"}))
